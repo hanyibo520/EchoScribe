@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
 
   # https://pub.dev/packages/logging
   # 日志记录库，用于记录应用程序的日志信息
@@ -90,16 +92,21 @@ dev_dependencies:
   # 代码规范检查工具
   flutter_lints: ^6.0.0
 
+  # https://pub.dev/packages/freezed
+  # 数据类生成工具，用于生成数据类和对应的 fromJson 和 toJson 方法
+  freezed: ^2.5.7
+
   # https://pub.dev/packages/build_runner
   # 代码生成工具，用于运行代码生成器（配合 json_serializable 使用）
   build_runner: ^2.4.13
 
   # https://pub.dev/packages/json_serializable
   # JSON 序列化代码生成器，自动生成 fromJson 和 toJson 方法
-  json_serializable: ^6.11.3
+  json_serializable: ^6.9.5
 
 flutter:
   uses-material-design: true
+  generate: true
 
   # 如果需要添加资源文件，取消下面的注释
   # assets:
