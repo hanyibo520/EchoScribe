@@ -75,7 +75,7 @@ class ExtendedColorScheme {
 }
 
 /// 主题颜色规范接口
-abstract class ColorTheme {
+abstract class WiseNoteColorTheme {
   /// 亮色模式的颜色方案
   ExtendedColorScheme get light;
 
@@ -87,7 +87,7 @@ abstract class ColorTheme {
 }
 
 /// 默认主题实现
-class DefaultColorTheme with CovertDarkMixin implements ColorTheme {
+class DefaultColorTheme with CovertDarkMixin implements WiseNoteColorTheme {
   @override
   String get name => 'Default';
 
@@ -193,7 +193,7 @@ class DefaultColorTheme with CovertDarkMixin implements ColorTheme {
 /// ```
 extension ExtendedColorSchemeExtension on BuildContext {
   /// 如果 ColorThemeController 尚未注册，会自动创建并注册（permanent: true 确保是全局单例）
-  ExtendedColorScheme get colorScheme {
+  ExtendedColorScheme get wiseNoteColorScheme {
     final controller = Get.put(ColorThemeController(), permanent: true);
     return controller.currentColorScheme;
   }

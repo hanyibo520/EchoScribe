@@ -4,11 +4,11 @@ import 'colors.dart';
 /// 主题控制器，使用 GetX 管理主题切换和暗黑模式
 class ColorThemeController extends GetxController {
   // 使用响应式变量，支持 Obx 自动监听
-  final Rx<ColorTheme> _currentTheme = DefaultColorTheme().obs;
+  final Rx<WiseNoteColorTheme> _currentTheme = DefaultColorTheme().obs;
   final RxBool _isDarkMode = false.obs;
 
   /// 获取当前主题
-  ColorTheme get currentTheme => _currentTheme.value;
+  WiseNoteColorTheme get currentTheme => _currentTheme.value;
 
   /// 获取当前是否为暗黑模式
   bool get isDarkMode => _isDarkMode.value;
@@ -18,7 +18,7 @@ class ColorThemeController extends GetxController {
       _isDarkMode.value ? _currentTheme.value.dark : _currentTheme.value.light;
 
   /// 切换主题
-  void switchTheme(ColorTheme theme) {
+  void switchTheme(WiseNoteColorTheme theme) {
     _currentTheme.value = theme;
   }
 

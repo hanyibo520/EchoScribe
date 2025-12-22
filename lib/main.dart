@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:flutter_wisenote/l10n/app_localizations.dart';
+import 'package:flutter_wisenote/l10n/l10n_extensions.dart';
 import 'package:flutter_wisenote/ui/core/themes/colors.dart';
 import 'package:flutter_wisenote/ui/core/themes/color_theme_controller.dart';
+import 'package:flutter_wisenote/ui/core/themes/texts.dart';
+import 'package:flutter_wisenote/ui/core/themes/text_theme_controller.dart';
 
 void main() {
   runApp(const MyApp());
@@ -14,20 +17,25 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // 确保控制器已注册
-    final controller = Get.put(ColorThemeController(), permanent: true);
-    
+    final colorController = Get.put(ColorThemeController(), permanent: true);
+    final textController = Get.put(TextStyleThemeController(), permanent: true);
+
     // 使用 Obx 自动监听主题和暗黑模式的变化
     return Obx(() {
-      final colorScheme = controller.currentColorScheme;
+      final colorScheme = colorController.currentColorScheme;
+      final textTheme = textController.currentTextTheme;
+
       return MaterialApp(
         title: 'Flutter Demo',
         theme: ThemeData(
           colorScheme: colorScheme.baseScheme,
+          textTheme: textTheme.baseTextTheme,
         ),
         darkTheme: ThemeData(
-          colorScheme: controller.currentTheme.dark.baseScheme,
+          colorScheme: colorController.currentTheme.dark.baseScheme,
+          textTheme: textTheme.baseTextTheme,
         ),
-        themeMode: controller.isDarkMode ? ThemeMode.dark : ThemeMode.light,
+        themeMode: colorController.isDarkMode ? ThemeMode.dark : ThemeMode.light,
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         home: const MyHomePage(title: 'Flutter Demo Home Page'),
@@ -57,17 +65,33 @@ class _MyHomePageState extends State<MyHomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: context.colorScheme.primary,
-        title: Text(widget.title),
+        backgroundColor: context.wiseNoteColorScheme.primary,
+        title: Text(
+          widget.title,
+          style: context.wiseNoteTextTheme.titleLarge.copyWith(
+            color: context.wiseNoteColorScheme.onPrimary,
+          ),
+        ),
       ),
       body: Center(
         child: Column(
-          mainAxisAlignment: .center,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(AppLocalizations.of(context)!.appName),
+            Text(
+              context.l10n.appName,
+              style: context.wiseNoteTextTheme.bodyLarge,
+            ),
             Text(
               '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+              style: context.wiseNoteTextTheme.displayMedium.copyWith(
+                color: context.wiseNoteColorScheme.primary,
+              ),
+            ),
+            Text(
+              'Text Theme titleLarge',
+              style: context.wiseNoteTextTheme.titleLarge.copyWith(
+                color: context.wiseNoteColorScheme.primary,
+              ),
             ),
           ],
         ),
