@@ -28,9 +28,17 @@ dependencies:
   # 强大的 HTTP 客户端库，支持拦截器、全局配置、FormData、文件上传/下载、请求取消等功能
   dio: ^5.9.0
 
+  # https://pub.dev/packages/pretty_dio_logger
+  # 漂亮的 Dio 日志打印插件，用于打印请求和响应日志 
+  pretty_dio_logger: ^1.4.0
+
   # https://pub.dev/packages/get
   # 高性能的状态管理、智能的依赖注入和便捷的路由管理解决方案
   get: ^4.7.3
+
+  # https://pub.dev/packages/go_router
+  # 路由管理插件，用于管理应用的导航和路由
+  go_router: ^17.0.1
 
   # https://pub.dev/packages/shared_preferences
   # 简单的键值对存储插件，用于存储轻量级持久化数据

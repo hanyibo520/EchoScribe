@@ -509,6 +509,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "2.1.3"
+  go_router:
+    dependency: "direct main"
+    description:
+      name: go_router
+      sha256: eff94d2a6fc79fa8b811dde79c7549808c2346037ee107a1121b4a644c745f2a
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "17.0.1"
   graphs:
     dependency: transitive
     description:
@@ -885,6 +893,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "1.5.2"
+  pretty_dio_logger:
+    dependency: "direct main"
+    description:
+      name: pretty_dio_logger
+      sha256: "36f2101299786d567869493e2f5731de61ce130faa14679473b26905a92b6407"
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "1.4.0"
   pub_semver:
     dependency: transitive
     description:

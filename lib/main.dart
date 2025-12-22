@@ -6,6 +6,7 @@ import 'package:flutter_wisenote/ui/core/themes/colors.dart';
 import 'package:flutter_wisenote/ui/core/themes/color_theme_controller.dart';
 import 'package:flutter_wisenote/ui/core/themes/texts.dart';
 import 'package:flutter_wisenote/ui/core/themes/text_theme_controller.dart';
+import 'package:flutter_wisenote/base/router/app_router.dart';
 
 void main() {
   runApp(const MyApp());
@@ -25,7 +26,8 @@ class MyApp extends StatelessWidget {
       final colorScheme = colorController.currentColorScheme;
       final textTheme = textController.currentTextTheme;
 
-      return MaterialApp(
+      return MaterialApp.router(
+        routerConfig: appRouter,
         title: 'Flutter Demo',
         theme: ThemeData(
           colorScheme: colorScheme.baseScheme,
@@ -38,7 +40,6 @@ class MyApp extends StatelessWidget {
         themeMode: colorController.isDarkMode ? ThemeMode.dark : ThemeMode.light,
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: const MyHomePage(title: 'Flutter Demo Home Page'),
       );
     });
   }
