@@ -26,51 +26,6 @@ const requiredModelFiles = <_RequiredModelFile>[
     path: 'assets/models/llm/qwen3-0.6b-q4.gguf',
     minBytes: 10 * 1024 * 1024,
   ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX model weights',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/model.safetensors',
-    minBytes: 10 * 1024 * 1024,
-  ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX model index',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/model.safetensors.index.json',
-    minBytes: 32,
-  ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX config',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/config.json',
-    minBytes: 32,
-  ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX tokenizer',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/tokenizer.json',
-    minBytes: 1024,
-  ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX tokenizer config',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/tokenizer_config.json',
-    minBytes: 32,
-  ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX special tokens map',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/special_tokens_map.json',
-    minBytes: 32,
-  ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX added tokens',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/added_tokens.json',
-    minBytes: 32,
-  ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX merges',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/merges.txt',
-    minBytes: 32,
-  ),
-  _RequiredModelFile(
-    label: 'Qwen3 0.6B MLX vocab',
-    path: 'assets/models/llm/qwen3-0.6b-mlx/vocab.json',
-    minBytes: 1024,
-  ),
 ];
 
 void main() {
