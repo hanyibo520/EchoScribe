@@ -6,6 +6,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'asr/asr_engine.dart';
 import 'asr/fallback_asr_service.dart';
 import 'asr/model_store.dart';
+import 'asr/partial_preview.dart';
 import 'asr/sherpa_sense_voice_asr_service.dart';
 import 'asr/system_asr_engine.dart';
 import 'asr/whisper_cpp_asr_engine.dart';
@@ -326,14 +327,14 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       return;
     }
 
-    final target = partial.text.trim();
+    final target = latestPartialPreviewText(partial.text);
     setState(() {
       if (target.isEmpty) {
         _clearPartialPreviewState();
         return;
       }
 
-      _partialTargetText = _mergePartialText(_partialTargetText, target);
+      _partialTargetText = target;
       _partialUpdatedAt = partial.updatedAt;
       _partialEngineName = partial.engineName;
 
@@ -415,67 +416,6 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       index += 1;
     }
     return String.fromCharCodes(firstRunes.take(index));
-  }
-
-  String _mergePartialText(String current, String incoming) {
-    if (current.isEmpty || incoming.isEmpty) {
-      return incoming.isEmpty ? current : incoming;
-    }
-    if (incoming.startsWith(current)) {
-      return incoming;
-    }
-    if (current.startsWith(incoming)) {
-      return current;
-    }
-
-    final overlap = _suffixPrefixOverlap(current, incoming);
-    if (overlap > 0) {
-      return current + String.fromCharCodes(incoming.runes.skip(overlap));
-    }
-
-    return current + _partialJoiner(current, incoming) + incoming;
-  }
-
-  int _suffixPrefixOverlap(String current, String incoming) {
-    final currentRunes = current.runes.toList(growable: false);
-    final incomingRunes = incoming.runes.toList(growable: false);
-    final maxOverlap = currentRunes.length < incomingRunes.length
-        ? currentRunes.length
-        : incomingRunes.length;
-
-    for (var length = maxOverlap; length >= 1; length -= 1) {
-      var matches = true;
-      for (var index = 0; index < length; index += 1) {
-        if (currentRunes[currentRunes.length - length + index] !=
-            incomingRunes[index]) {
-          matches = false;
-          break;
-        }
-      }
-      if (matches) {
-        return length;
-      }
-    }
-    return 0;
-  }
-
-  String _partialJoiner(String current, String incoming) {
-    final previous = String.fromCharCode(current.runes.last);
-    final next = String.fromCharCode(incoming.runes.first);
-    if (previous.trim().isEmpty || next.trim().isEmpty) {
-      return '';
-    }
-    if (_isAsciiWord(previous) && _isAsciiWord(next)) {
-      return ' ';
-    }
-    return '';
-  }
-
-  bool _isAsciiWord(String value) {
-    final code = value.codeUnitAt(0);
-    return (code >= 48 && code <= 57) ||
-        (code >= 65 && code <= 90) ||
-        (code >= 97 && code <= 122);
   }
 
   Future<void> _prepareModels() async {
