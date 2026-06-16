@@ -9,6 +9,7 @@ import 'audio_utils.dart';
 import 'model_store.dart';
 
 const int _sampleRate = 16000;
+const int _recognizerThreads = 4;
 const double _targetPeak = 0.92;
 const double _maxGain = 6.0;
 const double _vadBufferSeconds = 35;
@@ -35,19 +36,13 @@ class SenseVoiceFileTranscriber {
   Future<List<AsrSegment>> transcribePcm16Audio({
     required Uint8List pcm16Audio,
     required String sourceName,
+    SenseVoiceModelFiles? modelFiles,
   }) async {
     if (pcm16Audio.isEmpty) {
       return const <AsrSegment>[];
     }
 
-    final check = await _modelStore.inspect();
-    if (!check.isSenseVoiceReady) {
-      throw StateError(
-        'Missing SenseVoice files: ${check.missingSenseVoiceFiles.join(', ')}',
-      );
-    }
-
-    final files = check.senseVoiceFiles;
+    final files = modelFiles ?? await _senseVoiceModelFiles();
     final recognizedTexts = await Isolate.run(
       () => _transcribeSenseVoiceTextSegments(
         pcm16Audio: pcm16Audio,
@@ -70,6 +65,17 @@ class SenseVoiceFileTranscriber {
     }
     return segments;
   }
+
+  Future<SenseVoiceModelFiles> _senseVoiceModelFiles() async {
+    final check = await _modelStore.inspect();
+    if (check.isSenseVoiceReady) {
+      return check.senseVoiceFiles;
+    }
+
+    throw StateError(
+      'Missing SenseVoice files: ${check.missingSenseVoiceFiles.join(', ')}',
+    );
+  }
 }
 
 List<String> _transcribeSenseVoiceTextSegments({
@@ -89,7 +95,7 @@ List<String> _transcribeSenseVoiceTextSegments({
           useInverseTextNormalization: true,
         ),
         tokens: tokensPath,
-        numThreads: 2,
+        numThreads: _recognizerThreads,
         debug: false,
       ),
     ),
@@ -116,16 +122,14 @@ List<String> _transcribeSenseVoiceTextSegments({
     final speechSegments = _detectSpeechSegments(samples, vad);
     final segmentsToDecode = speechSegments.isEmpty
         ? _fixedChunks(samples)
-        : speechSegments;
+        : _chunkSpeechSegments(speechSegments);
 
-    final texts = <String>[];
-    for (final segmentSamples in segmentsToDecode) {
-      final text = _decodeSegment(recognizer, segmentSamples);
-      if (text.isNotEmpty) {
-        texts.add(text);
-      }
+    final texts = _decodeSegments(recognizer, segmentsToDecode);
+    if (texts.isNotEmpty || speechSegments.isEmpty) {
+      return texts;
     }
-    return texts;
+
+    return _decodeSegments(recognizer, _fixedChunks(samples));
   } finally {
     vad.free();
     recognizer.free();
@@ -158,7 +162,6 @@ List<Float32List> _detectSpeechSegments(
   sherpa.VoiceActivityDetector vad,
 ) {
   final segments = <Float32List>[];
-  final windowSize = vad.config.sileroVad.windowSize;
 
   for (
     var blockStart = 0;
@@ -166,11 +169,8 @@ List<Float32List> _detectSpeechSegments(
     blockStart += _vadBlockSamples
   ) {
     final blockEnd = math.min(blockStart + _vadBlockSamples, samples.length);
-    for (var start = blockStart; start < blockEnd; start += windowSize) {
-      final end = math.min(start + windowSize, blockEnd);
-      vad.acceptWaveform(Float32List.sublistView(samples, start, end));
-      _drainVad(vad, segments);
-    }
+    vad.acceptWaveform(Float32List.sublistView(samples, blockStart, blockEnd));
+    _drainVad(vad, segments);
 
     vad.flush();
     _drainVad(vad, segments);
@@ -200,6 +200,63 @@ List<Float32List> _fixedChunks(Float32List samples) {
     chunks.add(Float32List.sublistView(samples, start, end));
   }
   return chunks;
+}
+
+List<Float32List> _chunkSpeechSegments(List<Float32List> segments) {
+  final chunks = <Float32List>[];
+  final current = <Float32List>[];
+  var currentLength = 0;
+
+  void flush() {
+    if (currentLength == 0) {
+      return;
+    }
+    chunks.add(_concatChunks(current, currentLength));
+    current.clear();
+    currentLength = 0;
+  }
+
+  for (final segment in segments) {
+    var offset = 0;
+    while (offset < segment.length) {
+      if (currentLength == _fallbackChunkSamples) {
+        flush();
+      }
+
+      final available = _fallbackChunkSamples - currentLength;
+      final take = math.min(available, segment.length - offset);
+      current.add(Float32List.sublistView(segment, offset, offset + take));
+      currentLength += take;
+      offset += take;
+    }
+  }
+
+  flush();
+  return chunks;
+}
+
+Float32List _concatChunks(List<Float32List> chunks, int totalLength) {
+  final combined = Float32List(totalLength);
+  var offset = 0;
+  for (final chunk in chunks) {
+    combined.setRange(offset, offset + chunk.length, chunk);
+    offset += chunk.length;
+  }
+  return combined;
+}
+
+List<String> _decodeSegments(
+  sherpa.OfflineRecognizer recognizer,
+  List<Float32List> segments,
+) {
+  final texts = <String>[];
+  for (final segmentSamples in segments) {
+    final text = _decodeSegment(recognizer, segmentSamples);
+    if (text.isNotEmpty) {
+      texts.add(text);
+    }
+  }
+  return texts;
 }
 
 String _decodeSegment(

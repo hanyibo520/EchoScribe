@@ -6,16 +6,26 @@
 // tree, read text, and verify that the values of widget properties are correct.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:flutter_app/main.dart';
 
 void main() {
+  setUpAll(() {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  });
+
   testWidgets('Meeting ASR app smoke test', (WidgetTester tester) async {
     await tester.pumpWidget(const MeetingAsrApp());
     await tester.pump();
 
     expect(find.text('Local Meeting ASR'), findsOneWidget);
-    expect(find.text('Transcript'), findsOneWidget);
-    expect(find.text('Meeting Summary'), findsOneWidget);
+    expect(find.text('Model center'), findsOneWidget);
+
+    await tester.tap(find.text('Record'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Start recording'), findsOneWidget);
   });
 }

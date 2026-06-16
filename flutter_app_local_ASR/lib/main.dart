@@ -431,7 +431,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       return;
     }
 
-    if (!initial.hasInstallableMissingModels) {
+    if (initial.isSenseVoiceReady) {
       setState(() {
         _modelCheck = initial;
         _nativeBridgeReport = initialBridgeReport;
@@ -451,7 +451,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
     try {
       await _modelStore.installBundledModels(
-        scope: ModelInstallScope.all,
+        scope: ModelInstallScope.primaryAsr,
         onProgress: (progress) {
           if (!mounted) {
             return;
@@ -565,17 +565,25 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
   Future<List<AsrSegment>> _transcribeImportedAudio({
     required PickedAudioFile picked,
-    required DecodedPcmAudio decoded,
     required ModelCheckResult check,
     required NativeBridgeReport bridgeReport,
     required AppStrings strings,
   }) async {
+    var currentCheck = check;
+    var currentBridgeReport = bridgeReport;
     Object? senseVoiceError;
-    if (check.isSenseVoiceReady) {
+    if (currentCheck.isSenseVoiceReady) {
       try {
+        final decoded = await LocalNativeBridge.instance.decodeAudioFileToPcm16(
+          audioFilePath: picked.path,
+        );
+        if (decoded.pcm16Audio.isEmpty) {
+          return const <AsrSegment>[];
+        }
         final segments = await _senseVoiceFileTranscriber.transcribePcm16Audio(
           pcm16Audio: decoded.pcm16Audio,
           sourceName: picked.name,
+          modelFiles: currentCheck.senseVoiceFiles,
         );
         if (segments.isNotEmpty) {
           return segments;
@@ -585,32 +593,47 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       }
     } else {
       senseVoiceError =
-          'Missing SenseVoice files: ${check.missingSenseVoiceFiles.join(', ')}';
+          'Missing SenseVoice files: ${currentCheck.missingSenseVoiceFiles.join(', ')}';
     }
 
-    if (!check.isWhisperModelReady) {
+    if (!currentCheck.isWhisperModelReady) {
+      currentCheck = await _installWhisperFallbackModel(strings);
+      currentBridgeReport = await _inspectNativeBridges(currentCheck);
+      if (!mounted) {
+        return const <AsrSegment>[];
+      }
+      setState(() {
+        _modelCheck = currentCheck;
+        _nativeBridgeReport = currentBridgeReport;
+        _status = _StatusMessage(
+          (strings) => strings.transcribingAudioFile(picked.name),
+        );
+      });
+    }
+
+    if (!currentCheck.isWhisperModelReady) {
       final fallbackReason = senseVoiceError == null
           ? 'SenseVoice did not recognize speech in ${picked.name}'
           : 'SenseVoice file transcription failed: $senseVoiceError';
       throw StateError(
-        '$fallbackReason\nMissing whisper.cpp model: ${check.whisperModelPath}',
+        '$fallbackReason\nMissing whisper.cpp model: ${currentCheck.whisperModelPath}',
       );
     }
-    if (!bridgeReport.whisperCpp.isAvailable) {
+    if (!currentBridgeReport.whisperCpp.isAvailable) {
       final fallbackReason = senseVoiceError == null
           ? ''
           : 'SenseVoice file transcription failed: $senseVoiceError\n';
       throw StateError(
-        '$fallbackReason${bridgeReport.whisperCpp.reason ?? 'whisper.cpp is not available'}',
+        '$fallbackReason${currentBridgeReport.whisperCpp.reason ?? 'whisper.cpp is not available'}',
       );
     }
 
-    final text = await LocalNativeBridge.instance.transcribeWithWhisperCpp(
-      modelPath: check.whisperModelPath,
-      pcm16Audio: decoded.pcm16Audio,
-      sampleRate: decoded.sampleRate,
-      languageCode: strings.isZh ? 'zh' : 'en',
-    );
+    final text = await LocalNativeBridge.instance
+        .transcribeAudioFileWithWhisperCpp(
+          modelPath: currentCheck.whisperModelPath,
+          audioFilePath: picked.path,
+          languageCode: strings.isZh ? 'zh' : 'en',
+        );
     final trimmed = text.trim();
     if (trimmed.isEmpty) {
       return const <AsrSegment>[];
@@ -624,6 +647,28 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         engineName: 'whisper.cpp file: ${picked.name}',
       ),
     ];
+  }
+
+  Future<ModelCheckResult> _installWhisperFallbackModel(
+    AppStrings strings,
+  ) async {
+    await _modelStore.installBundledModels(
+      scope: ModelInstallScope.offlineTranscription,
+      onProgress: (progress) {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _status = _StatusMessage(
+            (strings) => strings.installingBundledModel(
+              progress.label,
+              _formatInstallProgress(progress),
+            ),
+          );
+        });
+      },
+    );
+    return _modelStore.inspect();
   }
 
   Future<void> _toggleRecording() async {
@@ -796,7 +841,10 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   }
 
   Future<void> _importAudioAndSummarize() async {
-    if (_isRecording || _isSummarizing || _isImportingAudio) {
+    if (_isRecording ||
+        _isSummarizing ||
+        _isImportingAudio ||
+        _isInstallingModels) {
       return;
     }
 
@@ -822,23 +870,6 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       }
       importedAudio = picked;
 
-      await _modelStore.installBundledModels(
-        scope: ModelInstallScope.offlineTranscription,
-        onProgress: (progress) {
-          if (!mounted) {
-            return;
-          }
-          setState(() {
-            _status = _StatusMessage(
-              (strings) => strings.installingBundledModel(
-                progress.label,
-                _formatInstallProgress(progress),
-              ),
-            );
-          });
-        },
-      );
-
       final check = await _modelStore.inspect();
       final bridgeReport = await _inspectNativeBridges(check);
       if (!mounted) {
@@ -852,15 +883,8 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         );
       });
 
-      final decoded = await LocalNativeBridge.instance.decodeAudioFileToPcm16(
-        audioFilePath: picked.path,
-      );
-      if (decoded.pcm16Audio.isEmpty) {
-        throw StateError(strings.audioFileNoSpeech);
-      }
       final importedSegments = await _transcribeImportedAudio(
         picked: picked,
-        decoded: decoded,
         check: check,
         bridgeReport: bridgeReport,
         strings: strings,
@@ -951,6 +975,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         status: _status.resolve(strings),
         tone: _status.tone,
         isImportingAudio: _isImportingAudio,
+        isInstallingModels: _isInstallingModels,
         isRecording: _isRecording,
         isSummarizing: _isSummarizing,
         hasRecordings: _recordings.isNotEmpty,
@@ -1730,6 +1755,7 @@ class _ImportWorkspace extends StatelessWidget {
     required this.status,
     required this.tone,
     required this.isImportingAudio,
+    required this.isInstallingModels,
     required this.isRecording,
     required this.isSummarizing,
     required this.hasRecordings,
@@ -1740,6 +1766,7 @@ class _ImportWorkspace extends StatelessWidget {
   final String status;
   final _StatusTone tone;
   final bool isImportingAudio;
+  final bool isInstallingModels;
   final bool isRecording;
   final bool isSummarizing;
   final bool hasRecordings;
@@ -1749,7 +1776,8 @@ class _ImportWorkspace extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final strings = AppStrings.of(context);
-    final isBusy = isImportingAudio || isRecording || isSummarizing;
+    final isBusy =
+        isImportingAudio || isInstallingModels || isRecording || isSummarizing;
     return _WorkspaceScaffold(
       title: strings.audioImport,
       status: status,

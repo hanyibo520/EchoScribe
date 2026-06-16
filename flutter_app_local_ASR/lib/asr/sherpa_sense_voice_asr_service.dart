@@ -13,8 +13,9 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
     : _modelStore = modelStore;
 
   static const int _sampleRate = 16000;
+  static const int _recognizerThreads = 4;
   static const Duration _partialInterval = Duration(milliseconds: 1200);
-  static const int _maxPartialSamples = _sampleRate * 12;
+  static const int _maxPartialSamples = _sampleRate * 4;
 
   final ModelStore _modelStore;
   final AudioRecorder _recorder = AudioRecorder();
@@ -42,7 +43,9 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
   bool _isInitialized = false;
   bool _isRecording = false;
   int _segmentIndex = 0;
-  final List<double> _partialSamples = <double>[];
+  final Float32RingBuffer _partialSamples = Float32RingBuffer(
+    capacity: _maxPartialSamples,
+  );
   DateTime _lastPartialDecodedAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastPartialText = '';
 
@@ -153,7 +156,7 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
         useInverseTextNormalization: true,
       ),
       tokens: files.tokens,
-      numThreads: 2,
+      numThreads: _recognizerThreads,
       debug: false,
     );
     _recognizer = sherpa.OfflineRecognizer(
@@ -243,11 +246,7 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
   }
 
   void _appendPartialSamples(Float32List samples) {
-    _partialSamples.addAll(samples);
-    if (_partialSamples.length <= _maxPartialSamples) {
-      return;
-    }
-    _partialSamples.removeRange(0, _partialSamples.length - _maxPartialSamples);
+    _partialSamples.push(samples);
   }
 
   void _emitPartialPreviewIfDue() {
@@ -264,7 +263,7 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
 
     final stream = recognizer.createStream();
     stream.acceptWaveform(
-      samples: Float32List.fromList(_partialSamples),
+      samples: _partialSamples.toFloat32List(),
       sampleRate: _sampleRate,
     );
     recognizer.decode(stream);
