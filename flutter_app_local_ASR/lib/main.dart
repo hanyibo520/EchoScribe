@@ -7,6 +7,7 @@ import 'asr/asr_engine.dart';
 import 'asr/fallback_asr_service.dart';
 import 'asr/model_store.dart';
 import 'asr/partial_preview.dart';
+import 'asr/sense_voice_file_transcriber.dart';
 import 'asr/sherpa_sense_voice_asr_service.dart';
 import 'asr/system_asr_engine.dart';
 import 'asr/whisper_cpp_asr_engine.dart';
@@ -114,6 +115,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     with WidgetsBindingObserver {
   late final ModelStore _modelStore;
   late final FallbackAsrService _asrService;
+  late final SenseVoiceFileTranscriber _senseVoiceFileTranscriber;
   late final MeetingSummaryService _simpleSummaryService;
   late final MeetingSummaryService _detailedSummaryService;
 
@@ -155,6 +157,9 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         WhisperCppAsrEngine(modelStore: _modelStore),
         SystemAsrEngine(),
       ],
+    );
+    _senseVoiceFileTranscriber = SenseVoiceFileTranscriber(
+      modelStore: _modelStore,
     );
     _simpleSummaryService = FallbackMeetingSummaryService(
       engines: [
@@ -558,6 +563,69 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     );
   }
 
+  Future<List<AsrSegment>> _transcribeImportedAudio({
+    required PickedAudioFile picked,
+    required DecodedPcmAudio decoded,
+    required ModelCheckResult check,
+    required NativeBridgeReport bridgeReport,
+    required AppStrings strings,
+  }) async {
+    Object? senseVoiceError;
+    if (check.isSenseVoiceReady) {
+      try {
+        final segments = await _senseVoiceFileTranscriber.transcribePcm16Audio(
+          pcm16Audio: decoded.pcm16Audio,
+          sourceName: picked.name,
+        );
+        if (segments.isNotEmpty) {
+          return segments;
+        }
+      } catch (error) {
+        senseVoiceError = error;
+      }
+    } else {
+      senseVoiceError =
+          'Missing SenseVoice files: ${check.missingSenseVoiceFiles.join(', ')}';
+    }
+
+    if (!check.isWhisperModelReady) {
+      final fallbackReason = senseVoiceError == null
+          ? 'SenseVoice did not recognize speech in ${picked.name}'
+          : 'SenseVoice file transcription failed: $senseVoiceError';
+      throw StateError(
+        '$fallbackReason\nMissing whisper.cpp model: ${check.whisperModelPath}',
+      );
+    }
+    if (!bridgeReport.whisperCpp.isAvailable) {
+      final fallbackReason = senseVoiceError == null
+          ? ''
+          : 'SenseVoice file transcription failed: $senseVoiceError\n';
+      throw StateError(
+        '$fallbackReason${bridgeReport.whisperCpp.reason ?? 'whisper.cpp is not available'}',
+      );
+    }
+
+    final text = await LocalNativeBridge.instance.transcribeWithWhisperCpp(
+      modelPath: check.whisperModelPath,
+      pcm16Audio: decoded.pcm16Audio,
+      sampleRate: decoded.sampleRate,
+      languageCode: strings.isZh ? 'zh' : 'en',
+    );
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) {
+      return const <AsrSegment>[];
+    }
+
+    return [
+      AsrSegment(
+        index: 1,
+        text: trimmed,
+        createdAt: DateTime.now(),
+        engineName: 'whisper.cpp file: ${picked.name}',
+      ),
+    ];
+  }
+
   Future<void> _toggleRecording() async {
     if (_isRecording) {
       setState(() {
@@ -739,6 +807,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       _status = _StatusMessage((strings) => strings.pickingAudioFile);
     });
 
+    PickedAudioFile? importedAudio;
     try {
       final picked = await LocalNativeBridge.instance.pickAudioFile();
       if (!mounted) {
@@ -751,6 +820,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         });
         return;
       }
+      importedAudio = picked;
 
       await _modelStore.installBundledModels(
         scope: ModelInstallScope.offlineTranscription,
@@ -782,28 +852,23 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         );
       });
 
-      if (!check.isWhisperModelReady) {
-        throw StateError(
-          'Missing whisper.cpp model: ${check.whisperModelPath}',
-        );
+      final decoded = await LocalNativeBridge.instance.decodeAudioFileToPcm16(
+        audioFilePath: picked.path,
+      );
+      if (decoded.pcm16Audio.isEmpty) {
+        throw StateError(strings.audioFileNoSpeech);
       }
-      if (!bridgeReport.whisperCpp.isAvailable) {
-        throw StateError(
-          bridgeReport.whisperCpp.reason ?? 'whisper.cpp is not available',
-        );
-      }
-
-      final text = await LocalNativeBridge.instance
-          .transcribeAudioFileWithWhisperCpp(
-            modelPath: check.whisperModelPath,
-            audioFilePath: picked.path,
-            languageCode: strings.isZh ? 'zh' : 'en',
-          );
-      final trimmed = text.trim();
+      final importedSegments = await _transcribeImportedAudio(
+        picked: picked,
+        decoded: decoded,
+        check: check,
+        bridgeReport: bridgeReport,
+        strings: strings,
+      );
       if (!mounted) {
         return;
       }
-      if (trimmed.isEmpty) {
+      if (importedSegments.isEmpty) {
         throw StateError(strings.audioFileNoSpeech);
       }
 
@@ -815,15 +880,9 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         );
       });
 
-      final importedSegment = AsrSegment(
-        index: 1,
-        text: trimmed,
-        createdAt: DateTime.now(),
-        engineName: 'whisper.cpp file: ${picked.name}',
-      );
       await _saveCompletedRecording(
-        segments: [importedSegment],
-        engineName: importedSegment.engineName,
+        segments: importedSegments,
+        engineName: importedSegments.first.engineName,
         sourceType: RecordingSourceType.import,
         title: strings.isZh ? '导入-${picked.name}' : 'Import-${picked.name}',
       );
@@ -839,6 +898,17 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
           tone: _StatusTone.error,
         );
       });
+    } finally {
+      final picked = importedAudio;
+      if (picked != null) {
+        try {
+          await LocalNativeBridge.instance.deleteImportedAudioIfNeeded(
+            picked.path,
+          );
+        } catch (_) {
+          // Best-effort cleanup for copied import files.
+        }
+      }
     }
   }
 

@@ -57,6 +57,15 @@ class MainActivity : FlutterActivity() {
                                 transcribeAudioFileWithWhisperCpp(call)
                             }
                         }
+                        "decodeAudioFileToPcm16" -> {
+                            runOnWorker(result) {
+                                decodeAudioFileToPcm16(call)
+                            }
+                        }
+                        "deleteImportedAudioIfNeeded" -> {
+                            removeImportedAudioIfNeeded(call.requiredString("audioFilePath"))
+                            result.success(null)
+                        }
                         "summarizeWithLlamaCpp" -> {
                             result.error(
                                 "LLAMA_CPP_UNAVAILABLE",
@@ -325,6 +334,18 @@ class MainActivity : FlutterActivity() {
         } finally {
             removeImportedAudioIfNeeded(audioFilePath)
         }
+    }
+
+    private fun decodeAudioFileToPcm16(call: MethodCall): Map<String, Any?> {
+        val audioFilePath = call.requiredString("audioFilePath")
+        if (!File(audioFilePath).exists()) {
+            throw IllegalArgumentException("Missing audio file at $audioFilePath")
+        }
+
+        return mapOf(
+            "pcm16Audio" to decodeAudioFileToPcm16(audioFilePath),
+            "sampleRate" to 16000
+        )
     }
 
     private fun decodeAudioFileToPcm16(audioFilePath: String): ByteArray {

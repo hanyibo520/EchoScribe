@@ -157,6 +157,52 @@ private enum NativeBridgeFailure: Error {
             }
           }
         }
+      case "decodeAudioFileToPcm16":
+        DispatchQueue.global(qos: .userInitiated).async {
+          do {
+            let response = try self.decodeAudioFileToPcm16(arguments: call.arguments)
+            DispatchQueue.main.async {
+              result(response)
+            }
+          } catch NativeBridgeFailure.invalidArguments(let message) {
+            DispatchQueue.main.async {
+              result(FlutterError(code: "INVALID_ARGUMENTS", message: message, details: nil))
+            }
+          } catch NativeBridgeFailure.runtime(let message) {
+            DispatchQueue.main.async {
+              result(FlutterError(code: "AUDIO_DECODE_FAILED", message: message, details: nil))
+            }
+          } catch {
+            DispatchQueue.main.async {
+              result(
+                FlutterError(
+                  code: "AUDIO_DECODE_FAILED",
+                  message: error.localizedDescription,
+                  details: nil
+                )
+              )
+            }
+          }
+        }
+      case "deleteImportedAudioIfNeeded":
+        do {
+          guard let values = call.arguments as? [String: Any],
+                let audioFilePath = values["audioFilePath"] as? String else {
+            throw NativeBridgeFailure.invalidArguments("Missing audio file path")
+          }
+          self.removeImportedAudioIfNeeded(filePath: audioFilePath)
+          result(nil)
+        } catch NativeBridgeFailure.invalidArguments(let message) {
+          result(FlutterError(code: "INVALID_ARGUMENTS", message: message, details: nil))
+        } catch {
+          result(
+            FlutterError(
+              code: "AUDIO_DELETE_FAILED",
+              message: error.localizedDescription,
+              details: nil
+            )
+          )
+        }
       case "summarizeWithLlamaCpp":
         result(
           FlutterError(
@@ -583,6 +629,25 @@ private enum NativeBridgeFailure: Error {
     return ["text": text]
   }
 
+  private func decodeAudioFileToPcm16(arguments: Any?) throws -> [String: Any] {
+    guard let values = arguments as? [String: Any] else {
+      throw NativeBridgeFailure.invalidArguments("Missing audio decode arguments")
+    }
+    guard let audioFilePath = values["audioFilePath"] as? String, !audioFilePath.isEmpty else {
+      throw NativeBridgeFailure.invalidArguments("Missing audio file path")
+    }
+    guard FileManager.default.fileExists(atPath: audioFilePath) else {
+      throw NativeBridgeFailure.invalidArguments("Missing audio file at \(audioFilePath)")
+    }
+
+    let samples = try decodeAudioFileSamples(filePath: audioFilePath)
+    let pcm16Data = float32SamplesToPcm16Data(samples)
+    return [
+      "pcm16Audio": FlutterStandardTypedData(bytes: pcm16Data),
+      "sampleRate": 16000
+    ]
+  }
+
   private func runWhisper(
     modelPath: String,
     pcm16Data: Data,
@@ -728,6 +793,18 @@ private enum NativeBridgeFailure: Error {
       }
     }
     return samples
+  }
+
+  private func float32SamplesToPcm16Data(_ samples: [Float]) -> Data {
+    var data = Data()
+    data.reserveCapacity(samples.count * 2)
+    for sample in samples {
+      let scaled = max(-1.0, min(1.0, sample)) * 32767.0
+      let value = Int16(clamping: Int(scaled.rounded()))
+      data.append(UInt8(truncatingIfNeeded: value))
+      data.append(UInt8(truncatingIfNeeded: value >> 8))
+    }
+    return data
   }
 
   private func whisperLanguageCode(_ value: String) -> String {

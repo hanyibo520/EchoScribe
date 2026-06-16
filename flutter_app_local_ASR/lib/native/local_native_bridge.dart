@@ -135,6 +135,33 @@ class LocalNativeBridge {
     return response?['text']?.toString() ?? '';
   }
 
+  Future<DecodedPcmAudio> decodeAudioFileToPcm16({
+    required String audioFilePath,
+  }) async {
+    final response = await _channel.invokeMapMethod<String, Object?>(
+      'decodeAudioFileToPcm16',
+      <String, Object?>{'audioFilePath': audioFilePath},
+    );
+    final audio = response?['pcm16Audio'];
+    return DecodedPcmAudio(
+      pcm16Audio: audio is Uint8List ? audio : Uint8List(0),
+      sampleRate: response?['sampleRate'] as int? ?? 16000,
+    );
+  }
+
+  Future<void> deleteImportedAudioIfNeeded(String audioFilePath) async {
+    try {
+      await _channel.invokeMethod<void>(
+        'deleteImportedAudioIfNeeded',
+        <String, Object?>{'audioFilePath': audioFilePath},
+      );
+    } on MissingPluginException {
+      await _deleteImportedAudioFallback(audioFilePath);
+    } on PlatformException {
+      await _deleteImportedAudioFallback(audioFilePath);
+    }
+  }
+
   Future<NativeBridgeStatus> checkLlamaCpp({required String modelPath}) async {
     final report = await inspectBridges(
       whisperModelPath: '',
@@ -180,6 +207,17 @@ class LocalNativeBridge {
     );
     return response ?? const <String, Object?>{};
   }
+
+  Future<void> _deleteImportedAudioFallback(String audioFilePath) async {
+    final file = File(audioFilePath);
+    if (file.parent.path.split(Platform.pathSeparator).last !=
+        'ImportedAudio') {
+      return;
+    }
+    if (await file.exists()) {
+      await file.delete();
+    }
+  }
 }
 
 class PickedAudioFile {
@@ -187,6 +225,13 @@ class PickedAudioFile {
 
   final String path;
   final String name;
+}
+
+class DecodedPcmAudio {
+  const DecodedPcmAudio({required this.pcm16Audio, required this.sampleRate});
+
+  final Uint8List pcm16Audio;
+  final int sampleRate;
 }
 
 class NativeBridgeReport {
