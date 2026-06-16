@@ -141,21 +141,27 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   );
   if (fixedDecodeResult.provider == _coreMlProvider &&
       fixedCandidate.isLowQuality) {
-    final cpuTexts = await _decodeFixedChunks(
+    final cpuRun = await _decodeFixedChunks(
       chunks: fixedChunks,
       modelPath: modelPath,
       tokensPath: tokensPath,
       workerCount: workerCount,
       provider: _cpuProvider,
     );
-    final cpuCandidate = scoreTranscript(cpuTexts, sampleCount: samples.length);
+    final cpuCandidate = scoreTranscript(
+      cpuRun.texts,
+      sampleCount: samples.length,
+    );
     fixedDecodeResult = fixedDecodeResult.withQualityRetry(
       selectedProvider: cpuCandidate.score >= fixedCandidate.score
           ? _cpuProvider
           : fixedDecodeResult.provider,
       selectedTexts: cpuCandidate.score >= fixedCandidate.score
-          ? cpuTexts
+          ? cpuRun.texts
           : fixedDecodeResult.texts,
+      selectedProfile: cpuCandidate.score >= fixedCandidate.score
+          ? cpuRun.profile
+          : fixedDecodeResult.profile,
       fallbackReason: cpuCandidate.score >= fixedCandidate.score
           ? 'coreml_low_quality_cpu_selected'
           : 'coreml_low_quality_cpu_rejected',
@@ -186,6 +192,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
       fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
       sampleCount: samples.length,
       fixedCandidate: fixedCandidate,
+      fixedDecodeProfile: fixedDecodeResult.profile,
       vadCandidate: null,
       vadSpeechSegmentCount: 0,
       vadFallbackRun: false,
@@ -240,6 +247,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
         fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
         sampleCount: samples.length,
         fixedCandidate: fixedCandidate,
+        fixedDecodeProfile: fixedDecodeResult.profile,
         vadCandidate: null,
         vadSpeechSegmentCount: vadSpeechSegmentCount,
         vadFallbackRun: true,
@@ -300,6 +308,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
     fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
     sampleCount: samples.length,
     fixedCandidate: fixedCandidate,
+    fixedDecodeProfile: fixedDecodeResult.profile,
     vadCandidate: vadCandidate,
     vadSpeechSegmentCount: vadSpeechSegmentCount,
     vadFallbackRun: true,
@@ -482,14 +491,16 @@ Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
   required String preferredProvider,
 }) async {
   if (preferredProvider == _cpuProvider) {
+    final run = await _decodeFixedChunks(
+      chunks: chunks,
+      modelPath: modelPath,
+      tokensPath: tokensPath,
+      workerCount: workerCount,
+      provider: _cpuProvider,
+    );
     return _FixedDecodeResult(
-      texts: await _decodeFixedChunks(
-        chunks: chunks,
-        modelPath: modelPath,
-        tokensPath: tokensPath,
-        workerCount: workerCount,
-        provider: _cpuProvider,
-      ),
+      texts: run.texts,
+      profile: run.profile,
       requestedProvider: _cpuProvider,
       provider: _cpuProvider,
       fallbackReason: null,
@@ -498,28 +509,32 @@ Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
   }
 
   try {
+    final run = await _decodeFixedChunks(
+      chunks: chunks,
+      modelPath: modelPath,
+      tokensPath: tokensPath,
+      workerCount: workerCount,
+      provider: preferredProvider,
+    );
     return _FixedDecodeResult(
-      texts: await _decodeFixedChunks(
-        chunks: chunks,
-        modelPath: modelPath,
-        tokensPath: tokensPath,
-        workerCount: workerCount,
-        provider: preferredProvider,
-      ),
+      texts: run.texts,
+      profile: run.profile,
       requestedProvider: preferredProvider,
       provider: preferredProvider,
       fallbackReason: null,
       qualityRetry: false,
     );
   } catch (error) {
+    final run = await _decodeFixedChunks(
+      chunks: chunks,
+      modelPath: modelPath,
+      tokensPath: tokensPath,
+      workerCount: workerCount,
+      provider: _cpuProvider,
+    );
     return _FixedDecodeResult(
-      texts: await _decodeFixedChunks(
-        chunks: chunks,
-        modelPath: modelPath,
-        tokensPath: tokensPath,
-        workerCount: workerCount,
-        provider: _cpuProvider,
-      ),
+      texts: run.texts,
+      profile: run.profile,
       requestedProvider: preferredProvider,
       provider: _cpuProvider,
       fallbackReason: _compactError(error),
@@ -528,7 +543,7 @@ Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
   }
 }
 
-Future<List<String>> _decodeFixedChunks({
+Future<_FixedDecodeRun> _decodeFixedChunks({
   required List<IndexedAudioChunk> chunks,
   required String modelPath,
   required String tokensPath,
@@ -536,20 +551,41 @@ Future<List<String>> _decodeFixedChunks({
   required String provider,
 }) async {
   if (chunks.isEmpty) {
-    return const <String>[];
+    return const _FixedDecodeRun(
+      texts: <String>[],
+      profile: FixedDecodeProfile(workers: <FixedWorkerDecodeProfile>[]),
+    );
   }
 
   if (workerCount <= 1) {
+    final totalWatch = Stopwatch()..start();
+    final initWatch = Stopwatch()..start();
     final recognizer = _createSenseVoiceRecognizer(
       modelPath: modelPath,
       tokensPath: tokensPath,
       numThreads: _recognizerThreads,
       provider: provider,
     );
+    initWatch.stop();
     try {
-      return mergeIndexedTranscripts(
-        _decodeIndexedAudioChunks(recognizer, chunks),
-        trimOverlaps: true,
+      final batch = _decodeIndexedAudioChunks(
+        recognizer,
+        chunks,
+        workerIndex: 0,
+      );
+      totalWatch.stop();
+      return _FixedDecodeRun(
+        texts: mergeIndexedTranscripts(batch.transcripts, trimOverlaps: true),
+        profile: FixedDecodeProfile(
+          workers: <FixedWorkerDecodeProfile>[
+            FixedWorkerDecodeProfile(
+              workerIndex: 0,
+              recognizerInitMs: initWatch.elapsedMilliseconds,
+              totalMs: totalWatch.elapsedMilliseconds,
+              chunks: batch.chunkProfiles,
+            ),
+          ],
+        ),
       );
     } finally {
       recognizer.free();
@@ -557,24 +593,30 @@ Future<List<String>> _decodeFixedChunks({
   }
 
   final batches = splitFixedDecodeBatches(chunks, workerCount);
-  final results = await Future.wait(
-    batches.map(
-      (batch) => Isolate.run(
+  final results = await Future.wait(<Future<_FixedChunkBatchResult>>[
+    for (var workerIndex = 0; workerIndex < batches.length; workerIndex += 1)
+      Isolate.run(
         () => _decodeFixedChunkBatch(
           _FixedChunkBatchPayload(
+            workerIndex: workerIndex,
             modelPath: modelPath,
             tokensPath: tokensPath,
             provider: provider,
-            chunks: batch,
+            chunks: batches[workerIndex],
           ),
         ),
       ),
-    ),
-  );
+  ]);
 
-  return mergeIndexedTranscripts(
-    results.expand((batch) => batch).toList(),
-    trimOverlaps: true,
+  return _FixedDecodeRun(
+    texts: mergeIndexedTranscripts(
+      results.expand((batch) => batch.transcripts).toList(),
+      trimOverlaps: true,
+    ),
+    profile: FixedDecodeProfile(
+      workers: results.map((batch) => batch.workerProfile).toList()
+        ..sort((left, right) => left.workerIndex.compareTo(right.workerIndex)),
+    ),
   );
 }
 
@@ -599,35 +641,66 @@ List<List<IndexedAudioChunk>> splitFixedDecodeBatches(
   return batches.where((batch) => batch.isNotEmpty).toList();
 }
 
-List<IndexedTranscript> _decodeFixedChunkBatch(
-  _FixedChunkBatchPayload payload,
-) {
+_FixedChunkBatchResult _decodeFixedChunkBatch(_FixedChunkBatchPayload payload) {
   sherpa.initBindings();
+  final totalWatch = Stopwatch()..start();
+  final initWatch = Stopwatch()..start();
   final recognizer = _createSenseVoiceRecognizer(
     modelPath: payload.modelPath,
     tokensPath: payload.tokensPath,
     numThreads: _parallelRecognizerThreads,
     provider: payload.provider,
   );
+  initWatch.stop();
   try {
-    return _decodeIndexedAudioChunks(recognizer, payload.chunks);
+    final batch = _decodeIndexedAudioChunks(
+      recognizer,
+      payload.chunks,
+      workerIndex: payload.workerIndex,
+    );
+    totalWatch.stop();
+    return _FixedChunkBatchResult(
+      transcripts: batch.transcripts,
+      workerProfile: FixedWorkerDecodeProfile(
+        workerIndex: payload.workerIndex,
+        recognizerInitMs: initWatch.elapsedMilliseconds,
+        totalMs: totalWatch.elapsedMilliseconds,
+        chunks: batch.chunkProfiles,
+      ),
+    );
   } finally {
     recognizer.free();
   }
 }
 
-List<IndexedTranscript> _decodeIndexedAudioChunks(
+_IndexedDecodeResult _decodeIndexedAudioChunks(
   sherpa.OfflineRecognizer recognizer,
-  List<IndexedAudioChunk> chunks,
-) {
+  List<IndexedAudioChunk> chunks, {
+  required int workerIndex,
+}) {
   final transcripts = <IndexedTranscript>[];
+  final chunkProfiles = <FixedChunkDecodeProfile>[];
   for (final chunk in chunks) {
+    final watch = Stopwatch()..start();
     final text = _decodeSegment(recognizer, chunk.samples);
+    watch.stop();
+    chunkProfiles.add(
+      FixedChunkDecodeProfile(
+        workerIndex: workerIndex,
+        chunkIndex: chunk.index,
+        decodeMs: watch.elapsedMilliseconds,
+        sampleCount: chunk.samples.length,
+        charCount: _meaningfulCharacterCount(text),
+      ),
+    );
     if (text.isNotEmpty) {
       transcripts.add(IndexedTranscript(index: chunk.index, text: text));
     }
   }
-  return transcripts;
+  return _IndexedDecodeResult(
+    transcripts: transcripts,
+    chunkProfiles: chunkProfiles,
+  );
 }
 
 List<String> mergeIndexedTranscripts(
@@ -757,6 +830,10 @@ TranscriptScore chooseTranscriptCandidate({
       : fixedCandidate;
 }
 
+String _formatIntList(Iterable<int> values) {
+  return values.join(',');
+}
+
 int _meaningfulCharacterCount(String text) {
   var count = 0;
   for (final rune in text.runes) {
@@ -804,14 +881,158 @@ class TranscriptScore {
   }
 }
 
+class FixedChunkDecodeProfile {
+  const FixedChunkDecodeProfile({
+    required this.workerIndex,
+    required this.chunkIndex,
+    required this.decodeMs,
+    required this.sampleCount,
+    required this.charCount,
+  });
+
+  final int workerIndex;
+  final int chunkIndex;
+  final int decodeMs;
+  final int sampleCount;
+  final int charCount;
+}
+
+class FixedWorkerDecodeProfile {
+  const FixedWorkerDecodeProfile({
+    required this.workerIndex,
+    required this.recognizerInitMs,
+    required this.totalMs,
+    required this.chunks,
+  });
+
+  final int workerIndex;
+  final int recognizerInitMs;
+  final int totalMs;
+  final List<FixedChunkDecodeProfile> chunks;
+
+  int get chunkDecodeMs {
+    var total = 0;
+    for (final chunk in chunks) {
+      total += chunk.decodeMs;
+    }
+    return total;
+  }
+}
+
+class FixedDecodeProfile {
+  const FixedDecodeProfile({required this.workers});
+
+  final List<FixedWorkerDecodeProfile> workers;
+
+  List<FixedChunkDecodeProfile> get chunks {
+    final all = <FixedChunkDecodeProfile>[
+      for (final worker in workers) ...worker.chunks,
+    ]..sort((left, right) => left.chunkIndex.compareTo(right.chunkIndex));
+    return all;
+  }
+
+  int get recognizerInitMs {
+    var maxMs = 0;
+    for (final worker in workers) {
+      maxMs = math.max(maxMs, worker.recognizerInitMs);
+    }
+    return maxMs;
+  }
+
+  int get recognizerInitSumMs {
+    var total = 0;
+    for (final worker in workers) {
+      total += worker.recognizerInitMs;
+    }
+    return total;
+  }
+
+  FixedChunkDecodeProfile? get slowestChunk {
+    FixedChunkDecodeProfile? slowest;
+    for (final chunk in chunks) {
+      if (slowest == null || chunk.decodeMs > slowest.decodeMs) {
+        slowest = chunk;
+      }
+    }
+    return slowest;
+  }
+
+  String get workerSummary {
+    if (workers.isEmpty) {
+      return 'none';
+    }
+
+    return workers
+        .map(
+          (worker) =>
+              '#${worker.workerIndex}:chunks=${worker.chunks.length} '
+              'indexes=${_formatIntList(worker.chunks.map((chunk) => chunk.chunkIndex))} '
+              'init=${worker.recognizerInitMs}ms '
+              'chunkDecode=${worker.chunkDecodeMs}ms total=${worker.totalMs}ms',
+        )
+        .join('; ');
+  }
+
+  List<String> chunkTimingLines({int entriesPerLine = 12}) {
+    final all = chunks;
+    if (all.isEmpty) {
+      return const <String>['[ASR import] fixedProfile chunks none'];
+    }
+
+    final lines = <String>[];
+    for (var start = 0; start < all.length; start += entriesPerLine) {
+      final end = math.min(start + entriesPerLine, all.length);
+      final entries = all
+          .sublist(start, end)
+          .map(
+            (chunk) =>
+                '#${chunk.chunkIndex}:${chunk.decodeMs}ms'
+                '(w${chunk.workerIndex},chars=${chunk.charCount})',
+          )
+          .join(' ');
+      lines.add('[ASR import] fixedProfile chunks[$start-${end - 1}] $entries');
+    }
+    return lines;
+  }
+}
+
+class _FixedDecodeRun {
+  const _FixedDecodeRun({required this.texts, required this.profile});
+
+  final List<String> texts;
+  final FixedDecodeProfile profile;
+}
+
+class _FixedChunkBatchResult {
+  const _FixedChunkBatchResult({
+    required this.transcripts,
+    required this.workerProfile,
+  });
+
+  final List<IndexedTranscript> transcripts;
+  final FixedWorkerDecodeProfile workerProfile;
+}
+
+class _IndexedDecodeResult {
+  const _IndexedDecodeResult({
+    required this.transcripts,
+    required this.chunkProfiles,
+  });
+
+  final List<IndexedTranscript> transcripts;
+  final List<FixedChunkDecodeProfile> chunkProfiles;
+}
+
 class _FixedChunkBatchPayload {
   const _FixedChunkBatchPayload({
+    required this.workerIndex,
     required this.modelPath,
     required this.tokensPath,
     required this.provider,
     required this.chunks,
   });
 
+  final int workerIndex;
   final String modelPath;
   final String tokensPath;
   final String provider;
@@ -821,6 +1042,7 @@ class _FixedChunkBatchPayload {
 class _FixedDecodeResult {
   const _FixedDecodeResult({
     required this.texts,
+    required this.profile,
     required this.requestedProvider,
     required this.provider,
     required this.fallbackReason,
@@ -828,6 +1050,7 @@ class _FixedDecodeResult {
   });
 
   final List<String> texts;
+  final FixedDecodeProfile profile;
   final String requestedProvider;
   final String provider;
   final String? fallbackReason;
@@ -836,10 +1059,12 @@ class _FixedDecodeResult {
   _FixedDecodeResult withQualityRetry({
     required String selectedProvider,
     required List<String> selectedTexts,
+    required FixedDecodeProfile selectedProfile,
     required String fallbackReason,
   }) {
     return _FixedDecodeResult(
       texts: selectedTexts,
+      profile: selectedProfile,
       requestedProvider: requestedProvider,
       provider: selectedProvider,
       fallbackReason: fallbackReason,
@@ -880,6 +1105,7 @@ class _FileTranscriptionResult {
     required this.fixedProviderQualityRetry,
     required this.sampleCount,
     required this.fixedCandidate,
+    required this.fixedDecodeProfile,
     required this.vadCandidate,
     required this.vadSpeechSegmentCount,
     required this.vadFallbackRun,
@@ -901,6 +1127,7 @@ class _FileTranscriptionResult {
   final bool fixedProviderQualityRetry;
   final int sampleCount;
   final TranscriptScore fixedCandidate;
+  final FixedDecodeProfile fixedDecodeProfile;
   final TranscriptScore? vadCandidate;
   final int vadSpeechSegmentCount;
   final bool vadFallbackRun;
@@ -911,6 +1138,7 @@ class _FileTranscriptionResult {
     final name = sourceName.replaceAll('\n', ' ');
     final audioSeconds = sampleCount / _sampleRate;
     final vad = vadCandidate;
+    final slowestChunk = fixedDecodeProfile.slowestChunk;
     return <String>[
       '[ASR import] result file=$name strategy=$strategy selectedSegments=${texts.length}',
       '[ASR import] audio sampleRate=$_sampleRate samples=$sampleCount '
@@ -932,6 +1160,11 @@ class _FileTranscriptionResult {
           'preprocess=${timings.preprocessMs}ms '
           'fixedDecode=${timings.fixedDecodeMs}ms '
           'vadDecode=${timings.vadDecodeMs}ms',
+      '[ASR import] fixedProfile recognizerInitMs=${fixedDecodeProfile.recognizerInitMs}ms '
+          'recognizerInitSum=${fixedDecodeProfile.recognizerInitSumMs}ms '
+          'slowestChunk=${slowestChunk == null ? 'none' : '#${slowestChunk.chunkIndex}:${slowestChunk.decodeMs}ms(w${slowestChunk.workerIndex},chars=${slowestChunk.charCount})'}',
+      '[ASR import] fixedProfile workers ${fixedDecodeProfile.workerSummary}',
+      ...fixedDecodeProfile.chunkTimingLines(),
       '[ASR import] fixedCandidate score=${fixedCandidate.score.toStringAsFixed(2)} '
           'lowQuality=${fixedCandidate.isLowQuality} '
           'segments=${fixedCandidate.texts.length} '

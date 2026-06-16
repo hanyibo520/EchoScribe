@@ -109,6 +109,59 @@ void main() {
     expect(indexes, const <int>[7]);
   });
 
+  test('FixedDecodeProfile summarizes workers and chunk timings', () {
+    const profile = FixedDecodeProfile(
+      workers: <FixedWorkerDecodeProfile>[
+        FixedWorkerDecodeProfile(
+          workerIndex: 0,
+          recognizerInitMs: 12,
+          totalMs: 110,
+          chunks: <FixedChunkDecodeProfile>[
+            FixedChunkDecodeProfile(
+              workerIndex: 0,
+              chunkIndex: 0,
+              decodeMs: 50,
+              sampleCount: 16000,
+              charCount: 12,
+            ),
+            FixedChunkDecodeProfile(
+              workerIndex: 0,
+              chunkIndex: 2,
+              decodeMs: 60,
+              sampleCount: 16000,
+              charCount: 14,
+            ),
+          ],
+        ),
+        FixedWorkerDecodeProfile(
+          workerIndex: 1,
+          recognizerInitMs: 20,
+          totalMs: 130,
+          chunks: <FixedChunkDecodeProfile>[
+            FixedChunkDecodeProfile(
+              workerIndex: 1,
+              chunkIndex: 1,
+              decodeMs: 120,
+              sampleCount: 16000,
+              charCount: 20,
+            ),
+          ],
+        ),
+      ],
+    );
+
+    expect(profile.recognizerInitMs, 20);
+    expect(profile.recognizerInitSumMs, 32);
+    expect(profile.slowestChunk?.chunkIndex, 1);
+    expect(profile.workerSummary, contains('#0:chunks=2 indexes=0,2'));
+    expect(profile.workerSummary, contains('#1:chunks=1 indexes=1'));
+    expect(profile.chunkTimingLines(entriesPerLine: 2), hasLength(2));
+    expect(
+      profile.chunkTimingLines(entriesPerLine: 2).first,
+      contains('#0:50ms'),
+    );
+  });
+
   test('decodableFixedOverlapChunks skips only digital silence chunks', () {
     const sampleRate = 16000;
     final rawSamples = Float32List(sampleRate * 60);
