@@ -574,8 +574,15 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     Object? senseVoiceError;
     if (currentCheck.isSenseVoiceReady) {
       try {
+        final decodeWatch = Stopwatch()..start();
         final decoded = await LocalNativeBridge.instance.decodeAudioFileToPcm16(
           audioFilePath: picked.path,
+        );
+        decodeWatch.stop();
+        debugPrint(
+          '[ASR import] file=${picked.name} audioToPcm='
+          '${decodeWatch.elapsedMilliseconds}ms pcmBytes='
+          '${decoded.pcm16Audio.length} sampleRate=${decoded.sampleRate}',
         );
         if (decoded.pcm16Audio.isEmpty) {
           return const <AsrSegment>[];

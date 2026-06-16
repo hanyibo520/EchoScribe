@@ -1,7 +1,8 @@
+import 'dart:io' show Platform;
 import 'dart:isolate';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 
 import 'asr_engine.dart';
@@ -14,7 +15,13 @@ const double _targetPeak = 0.92;
 const double _maxGain = 6.0;
 const double _vadBufferSeconds = 35;
 const int _vadBlockSamples = _sampleRate * 30;
-const int _fallbackChunkSamples = _sampleRate * 25;
+const int _fileChunkSamples = _sampleRate * 25;
+const int _fileChunkOverlapSamples = _sampleRate * 2;
+const int _parallelDecodeMinChunks = 6;
+const int _parallelDecodeWorkers = 2;
+const int _parallelRecognizerThreads = 2;
+const double _digitalSilencePeak = 2.0 / 32768.0;
+const int _digitalSilenceMaxLoudSamples = 8;
 
 class SenseVoiceFileTranscriber {
   SenseVoiceFileTranscriber({required ModelStore modelStore})
@@ -43,7 +50,7 @@ class SenseVoiceFileTranscriber {
     }
 
     final files = modelFiles ?? await _senseVoiceModelFiles();
-    final recognizedTexts = await Isolate.run(
+    final result = await Isolate.run(
       () => _transcribeSenseVoiceTextSegments(
         pcm16Audio: pcm16Audio,
         modelPath: files.model,
@@ -51,9 +58,10 @@ class SenseVoiceFileTranscriber {
         vadPath: files.vad,
       ),
     );
+    debugPrint(result.debugSummary(sourceName));
 
     final segments = <AsrSegment>[];
-    for (final text in recognizedTexts) {
+    for (final text in result.texts) {
       segments.add(
         AsrSegment(
           index: segments.length + 1,
@@ -78,29 +86,77 @@ class SenseVoiceFileTranscriber {
   }
 }
 
-List<String> _transcribeSenseVoiceTextSegments({
+Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   required Uint8List pcm16Audio,
   required String modelPath,
   required String tokensPath,
   required String vadPath,
-}) {
+}) async {
   sherpa.initBindings();
 
-  final recognizer = sherpa.OfflineRecognizer(
-    sherpa.OfflineRecognizerConfig(
-      model: sherpa.OfflineModelConfig(
-        senseVoice: sherpa.OfflineSenseVoiceModelConfig(
-          model: modelPath,
-          language: 'zh',
-          useInverseTextNormalization: true,
-        ),
-        tokens: tokensPath,
-        numThreads: _recognizerThreads,
-        debug: false,
-      ),
-    ),
-  );
+  final totalWatch = Stopwatch()..start();
+  final pcmWatch = Stopwatch()..start();
+  final rawSamples = pcm16BytesToFloat32(pcm16Audio);
+  pcmWatch.stop();
 
+  final preprocessWatch = Stopwatch()..start();
+  final samples = conditionSpeechSamples(
+    rawSamples,
+    sampleRate: _sampleRate,
+    targetPeak: _targetPeak,
+    maxGain: _maxGain,
+  );
+  preprocessWatch.stop();
+
+  final fixedChunks = decodableFixedOverlapChunks(
+    samples: samples,
+    rawSamples: rawSamples,
+  );
+  final workerCount = selectFixedDecodeWorkerCount(
+    chunkCount: fixedChunks.length,
+    processorCount: Platform.numberOfProcessors,
+    isIOS: Platform.isIOS,
+  );
+  final fixedWatch = Stopwatch()..start();
+  final fixedTexts = await _decodeFixedChunks(
+    chunks: fixedChunks,
+    modelPath: modelPath,
+    tokensPath: tokensPath,
+    workerCount: workerCount,
+  );
+  fixedWatch.stop();
+
+  final fixedCandidate = scoreTranscript(
+    fixedTexts,
+    sampleCount: samples.length,
+  );
+  final skippedSilentChunkCount =
+      fixedOverlapChunks(samples).length - fixedChunks.length;
+
+  if (!shouldRunVadFallback(fixedCandidate)) {
+    totalWatch.stop();
+    return _FileTranscriptionResult(
+      texts: fixedCandidate.texts,
+      strategy: workerCount > 1
+          ? 'fixed_parallel_${workerCount}w'
+          : 'fixed_serial',
+      fixedChunkCount: fixedChunks.length,
+      skippedSilentChunkCount: skippedSilentChunkCount,
+      workerCount: workerCount,
+      vadFallbackRun: false,
+      vadFallbackSelected: false,
+      timings: _AsrTimings(
+        pcmToFloatMs: pcmWatch.elapsedMilliseconds,
+        preprocessMs: preprocessWatch.elapsedMilliseconds,
+        fixedDecodeMs: fixedWatch.elapsedMilliseconds,
+        vadDecodeMs: 0,
+        totalMs: totalWatch.elapsedMilliseconds,
+      ),
+    );
+  }
+
+  final vadWatch = Stopwatch()..start();
+  late final TranscriptScore vadCandidate;
   final vad = sherpa.VoiceActivityDetector(
     config: sherpa.VadModelConfig(
       sileroVad: sherpa.SileroVadModelConfig(
@@ -118,28 +174,74 @@ List<String> _transcribeSenseVoiceTextSegments({
   );
 
   try {
-    final samples = conditionSpeechSamples(
-      pcm16BytesToFloat32(pcm16Audio),
-      sampleRate: _sampleRate,
-      targetPeak: _targetPeak,
-      maxGain: _maxGain,
-    );
     final speechSegments = _detectSpeechSegments(samples, vad);
-    final segmentsToDecode = speechSegments.isEmpty
-        ? _fixedChunks(samples)
-        : _chunkSpeechSegments(speechSegments);
-
-    final texts = _decodeSegments(recognizer, segmentsToDecode);
-    if (speechSegments.isEmpty ||
-        !_isLowQualityTranscript(texts, sampleCount: samples.length)) {
-      return texts;
+    if (speechSegments.isEmpty) {
+      vadWatch.stop();
+      totalWatch.stop();
+      return _FileTranscriptionResult(
+        texts: fixedCandidate.texts,
+        strategy: 'fixed_low_quality_no_vad_speech',
+        fixedChunkCount: fixedChunks.length,
+        skippedSilentChunkCount: skippedSilentChunkCount,
+        workerCount: workerCount,
+        vadFallbackRun: true,
+        vadFallbackSelected: false,
+        timings: _AsrTimings(
+          pcmToFloatMs: pcmWatch.elapsedMilliseconds,
+          preprocessMs: preprocessWatch.elapsedMilliseconds,
+          fixedDecodeMs: fixedWatch.elapsedMilliseconds,
+          vadDecodeMs: vadWatch.elapsedMilliseconds,
+          totalMs: totalWatch.elapsedMilliseconds,
+        ),
+      );
     }
 
-    return _decodeSegments(recognizer, _fixedChunks(samples));
+    final recognizer = _createSenseVoiceRecognizer(
+      modelPath: modelPath,
+      tokensPath: tokensPath,
+      numThreads: _recognizerThreads,
+    );
+    try {
+      vadCandidate = scoreTranscript(
+        _decodeSegments(
+          recognizer,
+          chunkSpeechSegments(speechSegments),
+          trimOverlaps: false,
+        ),
+        sampleCount: samples.length,
+      );
+    } finally {
+      recognizer.free();
+    }
   } finally {
     vad.free();
-    recognizer.free();
   }
+  vadWatch.stop();
+
+  final selected = chooseTranscriptCandidate(
+    fixedCandidate: fixedCandidate,
+    vadCandidate: vadCandidate,
+  );
+  final vadSelected = identical(selected, vadCandidate);
+  totalWatch.stop();
+  return _FileTranscriptionResult(
+    texts: selected.texts,
+    strategy: vadSelected
+        ? 'vad_fallback_selected'
+        : 'fixed_selected_after_vad',
+    fixedChunkCount: fixedChunks.length,
+    skippedSilentChunkCount: skippedSilentChunkCount,
+    workerCount: workerCount,
+    vadFallbackRun: true,
+    vadFallbackSelected: vadSelected,
+    timings: _AsrTimings(
+      pcmToFloatMs: pcmWatch.elapsedMilliseconds,
+      preprocessMs: preprocessWatch.elapsedMilliseconds,
+      fixedDecodeMs: fixedWatch.elapsedMilliseconds,
+      vadDecodeMs: vadWatch.elapsedMilliseconds,
+      totalMs: totalWatch.elapsedMilliseconds,
+    ),
+  );
 }
 
 List<Float32List> _detectSpeechSegments(
@@ -174,20 +276,88 @@ void _drainVad(sherpa.VoiceActivityDetector vad, List<Float32List> segments) {
   }
 }
 
-List<Float32List> _fixedChunks(Float32List samples) {
+List<Float32List> fixedOverlapChunks(Float32List samples) {
   if (samples.isEmpty) {
     return const <Float32List>[];
   }
 
   final chunks = <Float32List>[];
-  for (var start = 0; start < samples.length; start += _fallbackChunkSamples) {
-    final end = math.min(start + _fallbackChunkSamples, samples.length);
+  final step = _fileChunkSamples - _fileChunkOverlapSamples;
+  for (var start = 0; start < samples.length; start += step) {
+    final end = math.min(start + _fileChunkSamples, samples.length);
     chunks.add(Float32List.sublistView(samples, start, end));
+    if (end == samples.length) {
+      break;
+    }
   }
   return chunks;
 }
 
-List<Float32List> _chunkSpeechSegments(List<Float32List> segments) {
+List<IndexedAudioChunk> decodableFixedOverlapChunks({
+  required Float32List samples,
+  required Float32List rawSamples,
+}) {
+  if (samples.isEmpty) {
+    return const <IndexedAudioChunk>[];
+  }
+
+  final chunks = <IndexedAudioChunk>[];
+  final step = _fileChunkSamples - _fileChunkOverlapSamples;
+  var index = 0;
+  for (var start = 0; start < samples.length; start += step) {
+    final end = math.min(start + _fileChunkSamples, samples.length);
+    final rawEnd = math.min(end, rawSamples.length);
+    final rawChunk = rawEnd > start
+        ? Float32List.sublistView(rawSamples, start, rawEnd)
+        : Float32List(0);
+    if (!isNearlyDigitalSilence(rawChunk)) {
+      chunks.add(
+        IndexedAudioChunk(
+          index: index,
+          samples: Float32List.sublistView(samples, start, end),
+        ),
+      );
+    }
+    index += 1;
+    if (end == samples.length) {
+      break;
+    }
+  }
+  return chunks;
+}
+
+bool isNearlyDigitalSilence(Float32List samples) {
+  if (samples.isEmpty) {
+    return true;
+  }
+
+  var loudSamples = 0;
+  for (final sample in samples) {
+    if (sample.abs() > _digitalSilencePeak) {
+      loudSamples += 1;
+      if (loudSamples > _digitalSilenceMaxLoudSamples) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+int selectFixedDecodeWorkerCount({
+  required int chunkCount,
+  required int processorCount,
+  required bool isIOS,
+}) {
+  if (!isIOS || chunkCount < _parallelDecodeMinChunks) {
+    return 1;
+  }
+  if (processorCount < _parallelDecodeWorkers * _parallelRecognizerThreads) {
+    return 1;
+  }
+  return _parallelDecodeWorkers;
+}
+
+List<Float32List> chunkSpeechSegments(List<Float32List> segments) {
   final chunks = <Float32List>[];
   final current = <Float32List>[];
   var currentLength = 0;
@@ -204,11 +374,11 @@ List<Float32List> _chunkSpeechSegments(List<Float32List> segments) {
   for (final segment in segments) {
     var offset = 0;
     while (offset < segment.length) {
-      if (currentLength == _fallbackChunkSamples) {
+      if (currentLength == _fileChunkSamples) {
         flush();
       }
 
-      final available = _fallbackChunkSamples - currentLength;
+      final available = _fileChunkSamples - currentLength;
       final take = math.min(available, segment.length - offset);
       current.add(Float32List.sublistView(segment, offset, offset + take));
       currentLength += take;
@@ -230,23 +400,183 @@ Float32List _concatChunks(List<Float32List> chunks, int totalLength) {
   return combined;
 }
 
-List<String> _decodeSegments(
-  sherpa.OfflineRecognizer recognizer,
-  List<Float32List> segments,
+Future<List<String>> _decodeFixedChunks({
+  required List<IndexedAudioChunk> chunks,
+  required String modelPath,
+  required String tokensPath,
+  required int workerCount,
+}) async {
+  if (chunks.isEmpty) {
+    return const <String>[];
+  }
+
+  if (workerCount <= 1) {
+    final recognizer = _createSenseVoiceRecognizer(
+      modelPath: modelPath,
+      tokensPath: tokensPath,
+      numThreads: _recognizerThreads,
+    );
+    try {
+      return mergeIndexedTranscripts(
+        _decodeIndexedAudioChunks(recognizer, chunks),
+        trimOverlaps: true,
+      );
+    } finally {
+      recognizer.free();
+    }
+  }
+
+  final batches = splitFixedDecodeBatches(chunks, workerCount);
+  final results = await Future.wait(
+    batches.map(
+      (batch) => Isolate.run(
+        () => _decodeFixedChunkBatch(
+          _FixedChunkBatchPayload(
+            modelPath: modelPath,
+            tokensPath: tokensPath,
+            chunks: batch,
+          ),
+        ),
+      ),
+    ),
+  );
+
+  return mergeIndexedTranscripts(
+    results.expand((batch) => batch).toList(),
+    trimOverlaps: true,
+  );
+}
+
+List<List<IndexedAudioChunk>> splitFixedDecodeBatches(
+  List<IndexedAudioChunk> chunks,
+  int workerCount,
 ) {
-  final texts = <String>[];
-  for (final segmentSamples in segments) {
-    final text = _decodeSegment(recognizer, segmentSamples);
+  final batchCount = math.min(workerCount, chunks.length);
+  final batches = List<List<IndexedAudioChunk>>.generate(
+    batchCount,
+    (_) => <IndexedAudioChunk>[],
+  );
+  for (var i = 0; i < chunks.length; i += 1) {
+    final chunk = chunks[i];
+    batches[i % batchCount].add(
+      IndexedAudioChunk(
+        index: chunk.index,
+        samples: Float32List.fromList(chunk.samples),
+      ),
+    );
+  }
+  return batches.where((batch) => batch.isNotEmpty).toList();
+}
+
+List<IndexedTranscript> _decodeFixedChunkBatch(
+  _FixedChunkBatchPayload payload,
+) {
+  sherpa.initBindings();
+  final recognizer = _createSenseVoiceRecognizer(
+    modelPath: payload.modelPath,
+    tokensPath: payload.tokensPath,
+    numThreads: _parallelRecognizerThreads,
+  );
+  try {
+    return _decodeIndexedAudioChunks(recognizer, payload.chunks);
+  } finally {
+    recognizer.free();
+  }
+}
+
+List<IndexedTranscript> _decodeIndexedAudioChunks(
+  sherpa.OfflineRecognizer recognizer,
+  List<IndexedAudioChunk> chunks,
+) {
+  final transcripts = <IndexedTranscript>[];
+  for (final chunk in chunks) {
+    final text = _decodeSegment(recognizer, chunk.samples);
     if (text.isNotEmpty) {
-      texts.add(text);
+      transcripts.add(IndexedTranscript(index: chunk.index, text: text));
+    }
+  }
+  return transcripts;
+}
+
+List<String> mergeIndexedTranscripts(
+  List<IndexedTranscript> transcripts, {
+  required bool trimOverlaps,
+}) {
+  final sorted = transcripts.where((item) => item.text.isNotEmpty).toList()
+    ..sort((left, right) => left.index.compareTo(right.index));
+
+  final texts = <String>[];
+  for (final transcript in sorted) {
+    final deduped = trimOverlaps && texts.isNotEmpty
+        ? trimRepeatedPrefix(previous: texts.last, current: transcript.text)
+        : transcript.text;
+    if (deduped.isNotEmpty) {
+      texts.add(deduped);
     }
   }
   return texts;
 }
 
-bool _isLowQualityTranscript(List<String> texts, {required int sampleCount}) {
+List<String> _decodeSegments(
+  sherpa.OfflineRecognizer recognizer,
+  List<Float32List> segments, {
+  required bool trimOverlaps,
+}) {
+  final texts = <String>[];
+  for (final segmentSamples in segments) {
+    final text = _decodeSegment(recognizer, segmentSamples);
+    if (text.isEmpty) {
+      continue;
+    }
+
+    final deduped = trimOverlaps && texts.isNotEmpty
+        ? trimRepeatedPrefix(previous: texts.last, current: text)
+        : text;
+    if (deduped.isNotEmpty) {
+      texts.add(deduped);
+    }
+  }
+  return texts;
+}
+
+String trimRepeatedPrefix({required String previous, required String current}) {
+  final previousRunes = previous.runes.toList();
+  final currentRunes = current.runes.toList();
+  final maxOverlap = math.min(
+    32,
+    math.min(previousRunes.length, currentRunes.length),
+  );
+
+  for (var length = maxOverlap; length >= 3; length -= 1) {
+    var matches = true;
+    for (var i = 0; i < length; i += 1) {
+      if (previousRunes[previousRunes.length - length + i] != currentRunes[i]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches &&
+        _meaningfulCharacterCount(
+              String.fromCharCodes(currentRunes.take(length)),
+            ) >=
+            3) {
+      return String.fromCharCodes(currentRunes.skip(length)).trim();
+    }
+  }
+
+  return current;
+}
+
+TranscriptScore scoreTranscript(
+  List<String> texts, {
+  required int sampleCount,
+}) {
   if (texts.isEmpty) {
-    return true;
+    return const TranscriptScore(
+      texts: <String>[],
+      score: double.negativeInfinity,
+      isLowQuality: true,
+    );
   }
 
   final durationSeconds = sampleCount / _sampleRate;
@@ -262,16 +592,37 @@ bool _isLowQualityTranscript(List<String> texts, {required int sampleCount}) {
 
   final shortRatio = shortSegments / texts.length;
   final averageLength = meaningfulTotal / texts.length;
+  final charDensity = durationSeconds <= 0
+      ? 0.0
+      : meaningfulTotal / durationSeconds;
+  final score = meaningfulTotal + averageLength * 8 - shortRatio * 80;
 
   if (texts.length >= 6 && shortRatio >= 0.65 && averageLength < 4) {
-    return true;
+    return TranscriptScore(texts: texts, score: score, isLowQuality: true);
   }
 
   if (durationSeconds >= 60 && meaningfulTotal < durationSeconds * 0.4) {
-    return true;
+    return TranscriptScore(texts: texts, score: score, isLowQuality: true);
   }
 
-  return false;
+  if (durationSeconds >= 30 && charDensity < 0.25) {
+    return TranscriptScore(texts: texts, score: score, isLowQuality: true);
+  }
+
+  return TranscriptScore(texts: texts, score: score, isLowQuality: false);
+}
+
+bool shouldRunVadFallback(TranscriptScore fixedCandidate) {
+  return fixedCandidate.isLowQuality;
+}
+
+TranscriptScore chooseTranscriptCandidate({
+  required TranscriptScore fixedCandidate,
+  required TranscriptScore vadCandidate,
+}) {
+  return vadCandidate.score > fixedCandidate.score
+      ? vadCandidate
+      : fixedCandidate;
 }
 
 int _meaningfulCharacterCount(String text) {
@@ -285,6 +636,115 @@ int _meaningfulCharacterCount(String text) {
     }
   }
   return count;
+}
+
+class IndexedAudioChunk {
+  const IndexedAudioChunk({required this.index, required this.samples});
+
+  final int index;
+  final Float32List samples;
+}
+
+class IndexedTranscript {
+  const IndexedTranscript({required this.index, required this.text});
+
+  final int index;
+  final String text;
+}
+
+class TranscriptScore {
+  const TranscriptScore({
+    required this.texts,
+    required this.score,
+    required this.isLowQuality,
+  });
+
+  final List<String> texts;
+  final double score;
+  final bool isLowQuality;
+}
+
+class _FixedChunkBatchPayload {
+  const _FixedChunkBatchPayload({
+    required this.modelPath,
+    required this.tokensPath,
+    required this.chunks,
+  });
+
+  final String modelPath;
+  final String tokensPath;
+  final List<IndexedAudioChunk> chunks;
+}
+
+class _AsrTimings {
+  const _AsrTimings({
+    required this.pcmToFloatMs,
+    required this.preprocessMs,
+    required this.fixedDecodeMs,
+    required this.vadDecodeMs,
+    required this.totalMs,
+  });
+
+  final int pcmToFloatMs;
+  final int preprocessMs;
+  final int fixedDecodeMs;
+  final int vadDecodeMs;
+  final int totalMs;
+}
+
+class _FileTranscriptionResult {
+  const _FileTranscriptionResult({
+    required this.texts,
+    required this.strategy,
+    required this.fixedChunkCount,
+    required this.skippedSilentChunkCount,
+    required this.workerCount,
+    required this.vadFallbackRun,
+    required this.vadFallbackSelected,
+    required this.timings,
+  });
+
+  final List<String> texts;
+  final String strategy;
+  final int fixedChunkCount;
+  final int skippedSilentChunkCount;
+  final int workerCount;
+  final bool vadFallbackRun;
+  final bool vadFallbackSelected;
+  final _AsrTimings timings;
+
+  String debugSummary(String sourceName) {
+    final name = sourceName.replaceAll('\n', ' ');
+    return '[ASR import] file=$name strategy=$strategy '
+        'total=${timings.totalMs}ms pcmToFloat=${timings.pcmToFloatMs}ms '
+        'preprocess=${timings.preprocessMs}ms '
+        'fixedDecode=${timings.fixedDecodeMs}ms '
+        'vadDecode=${timings.vadDecodeMs}ms fixedChunks=$fixedChunkCount '
+        'skippedSilent=$skippedSilentChunkCount workers=$workerCount '
+        'vadRun=$vadFallbackRun vadSelected=$vadFallbackSelected '
+        'segments=${texts.length}';
+  }
+}
+
+sherpa.OfflineRecognizer _createSenseVoiceRecognizer({
+  required String modelPath,
+  required String tokensPath,
+  required int numThreads,
+}) {
+  return sherpa.OfflineRecognizer(
+    sherpa.OfflineRecognizerConfig(
+      model: sherpa.OfflineModelConfig(
+        senseVoice: sherpa.OfflineSenseVoiceModelConfig(
+          model: modelPath,
+          language: 'zh',
+          useInverseTextNormalization: true,
+        ),
+        tokens: tokensPath,
+        numThreads: numThreads,
+        debug: false,
+      ),
+    ),
+  );
 }
 
 String _decodeSegment(
