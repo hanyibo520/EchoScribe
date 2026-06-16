@@ -15,13 +15,16 @@ const double _targetPeak = 0.92;
 const double _maxGain = 6.0;
 const double _vadBufferSeconds = 35;
 const int _vadBlockSamples = _sampleRate * 30;
-const int _fileChunkSamples = _sampleRate * 25;
+const int _fixedChunkSamples = _sampleRate * 30;
+const int _vadFallbackChunkSamples = _sampleRate * 25;
 const int _fileChunkOverlapSamples = _sampleRate * 2;
 const int _parallelDecodeMinChunks = 6;
 const int _parallelDecodeWorkers = 2;
 const int _parallelRecognizerThreads = 2;
 const double _digitalSilencePeak = 2.0 / 32768.0;
 const int _digitalSilenceMaxLoudSamples = 8;
+const String _cpuProvider = 'cpu';
+const String _coreMlProvider = 'coreml';
 
 class SenseVoiceFileTranscriber {
   SenseVoiceFileTranscriber({required ModelStore modelStore})
@@ -58,7 +61,9 @@ class SenseVoiceFileTranscriber {
         vadPath: files.vad,
       ),
     );
-    debugPrint(result.debugSummary(sourceName));
+    for (final line in result.debugLines(sourceName)) {
+      debugPrint(line);
+    }
 
     final segments = <AsrSegment>[];
     for (final text in result.texts) {
@@ -112,26 +117,55 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
     samples: samples,
     rawSamples: rawSamples,
   );
+  final totalFixedChunkCount = fixedOverlapChunks(samples).length;
+  final processorCount = Platform.numberOfProcessors;
+  final isIOS = Platform.isIOS;
+  final preferredFixedProvider = selectFixedDecodeProvider(isIOS: isIOS);
   final workerCount = selectFixedDecodeWorkerCount(
     chunkCount: fixedChunks.length,
-    processorCount: Platform.numberOfProcessors,
-    isIOS: Platform.isIOS,
+    processorCount: processorCount,
+    isIOS: isIOS,
   );
   final fixedWatch = Stopwatch()..start();
-  final fixedTexts = await _decodeFixedChunks(
+  var fixedDecodeResult = await _decodeFixedChunksWithProviderFallback(
     chunks: fixedChunks,
     modelPath: modelPath,
     tokensPath: tokensPath,
     workerCount: workerCount,
+    preferredProvider: preferredFixedProvider,
   );
-  fixedWatch.stop();
 
-  final fixedCandidate = scoreTranscript(
-    fixedTexts,
+  var fixedCandidate = scoreTranscript(
+    fixedDecodeResult.texts,
     sampleCount: samples.length,
   );
-  final skippedSilentChunkCount =
-      fixedOverlapChunks(samples).length - fixedChunks.length;
+  if (fixedDecodeResult.provider == _coreMlProvider &&
+      fixedCandidate.isLowQuality) {
+    final cpuTexts = await _decodeFixedChunks(
+      chunks: fixedChunks,
+      modelPath: modelPath,
+      tokensPath: tokensPath,
+      workerCount: workerCount,
+      provider: _cpuProvider,
+    );
+    final cpuCandidate = scoreTranscript(cpuTexts, sampleCount: samples.length);
+    fixedDecodeResult = fixedDecodeResult.withQualityRetry(
+      selectedProvider: cpuCandidate.score >= fixedCandidate.score
+          ? _cpuProvider
+          : fixedDecodeResult.provider,
+      selectedTexts: cpuCandidate.score >= fixedCandidate.score
+          ? cpuTexts
+          : fixedDecodeResult.texts,
+      fallbackReason: cpuCandidate.score >= fixedCandidate.score
+          ? 'coreml_low_quality_cpu_selected'
+          : 'coreml_low_quality_cpu_rejected',
+    );
+    if (cpuCandidate.score >= fixedCandidate.score) {
+      fixedCandidate = cpuCandidate;
+    }
+  }
+  fixedWatch.stop();
+  final skippedSilentChunkCount = totalFixedChunkCount - fixedChunks.length;
 
   if (!shouldRunVadFallback(fixedCandidate)) {
     totalWatch.stop();
@@ -141,8 +175,19 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
           ? 'fixed_parallel_${workerCount}w'
           : 'fixed_serial',
       fixedChunkCount: fixedChunks.length,
+      totalFixedChunkCount: totalFixedChunkCount,
       skippedSilentChunkCount: skippedSilentChunkCount,
       workerCount: workerCount,
+      processorCount: processorCount,
+      isIOS: isIOS,
+      requestedFixedProvider: fixedDecodeResult.requestedProvider,
+      fixedProvider: fixedDecodeResult.provider,
+      fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
+      fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+      sampleCount: samples.length,
+      fixedCandidate: fixedCandidate,
+      vadCandidate: null,
+      vadSpeechSegmentCount: 0,
       vadFallbackRun: false,
       vadFallbackSelected: false,
       timings: _AsrTimings(
@@ -157,6 +202,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
 
   final vadWatch = Stopwatch()..start();
   late final TranscriptScore vadCandidate;
+  var vadSpeechSegmentCount = 0;
   final vad = sherpa.VoiceActivityDetector(
     config: sherpa.VadModelConfig(
       sileroVad: sherpa.SileroVadModelConfig(
@@ -175,6 +221,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
 
   try {
     final speechSegments = _detectSpeechSegments(samples, vad);
+    vadSpeechSegmentCount = speechSegments.length;
     if (speechSegments.isEmpty) {
       vadWatch.stop();
       totalWatch.stop();
@@ -182,8 +229,19 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
         texts: fixedCandidate.texts,
         strategy: 'fixed_low_quality_no_vad_speech',
         fixedChunkCount: fixedChunks.length,
+        totalFixedChunkCount: totalFixedChunkCount,
         skippedSilentChunkCount: skippedSilentChunkCount,
         workerCount: workerCount,
+        processorCount: processorCount,
+        isIOS: isIOS,
+        requestedFixedProvider: fixedDecodeResult.requestedProvider,
+        fixedProvider: fixedDecodeResult.provider,
+        fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
+        fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+        sampleCount: samples.length,
+        fixedCandidate: fixedCandidate,
+        vadCandidate: null,
+        vadSpeechSegmentCount: vadSpeechSegmentCount,
         vadFallbackRun: true,
         vadFallbackSelected: false,
         timings: _AsrTimings(
@@ -200,6 +258,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
       modelPath: modelPath,
       tokensPath: tokensPath,
       numThreads: _recognizerThreads,
+      provider: _cpuProvider,
     );
     try {
       vadCandidate = scoreTranscript(
@@ -230,8 +289,19 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
         ? 'vad_fallback_selected'
         : 'fixed_selected_after_vad',
     fixedChunkCount: fixedChunks.length,
+    totalFixedChunkCount: totalFixedChunkCount,
     skippedSilentChunkCount: skippedSilentChunkCount,
     workerCount: workerCount,
+    processorCount: processorCount,
+    isIOS: isIOS,
+    requestedFixedProvider: fixedDecodeResult.requestedProvider,
+    fixedProvider: fixedDecodeResult.provider,
+    fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
+    fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+    sampleCount: samples.length,
+    fixedCandidate: fixedCandidate,
+    vadCandidate: vadCandidate,
+    vadSpeechSegmentCount: vadSpeechSegmentCount,
     vadFallbackRun: true,
     vadFallbackSelected: vadSelected,
     timings: _AsrTimings(
@@ -282,9 +352,9 @@ List<Float32List> fixedOverlapChunks(Float32List samples) {
   }
 
   final chunks = <Float32List>[];
-  final step = _fileChunkSamples - _fileChunkOverlapSamples;
+  final step = _fixedChunkSamples - _fileChunkOverlapSamples;
   for (var start = 0; start < samples.length; start += step) {
-    final end = math.min(start + _fileChunkSamples, samples.length);
+    final end = math.min(start + _fixedChunkSamples, samples.length);
     chunks.add(Float32List.sublistView(samples, start, end));
     if (end == samples.length) {
       break;
@@ -302,10 +372,10 @@ List<IndexedAudioChunk> decodableFixedOverlapChunks({
   }
 
   final chunks = <IndexedAudioChunk>[];
-  final step = _fileChunkSamples - _fileChunkOverlapSamples;
+  final step = _fixedChunkSamples - _fileChunkOverlapSamples;
   var index = 0;
   for (var start = 0; start < samples.length; start += step) {
-    final end = math.min(start + _fileChunkSamples, samples.length);
+    final end = math.min(start + _fixedChunkSamples, samples.length);
     final rawEnd = math.min(end, rawSamples.length);
     final rawChunk = rawEnd > start
         ? Float32List.sublistView(rawSamples, start, rawEnd)
@@ -357,6 +427,10 @@ int selectFixedDecodeWorkerCount({
   return _parallelDecodeWorkers;
 }
 
+String selectFixedDecodeProvider({required bool isIOS}) {
+  return isIOS ? _coreMlProvider : _cpuProvider;
+}
+
 List<Float32List> chunkSpeechSegments(List<Float32List> segments) {
   final chunks = <Float32List>[];
   final current = <Float32List>[];
@@ -374,11 +448,11 @@ List<Float32List> chunkSpeechSegments(List<Float32List> segments) {
   for (final segment in segments) {
     var offset = 0;
     while (offset < segment.length) {
-      if (currentLength == _fileChunkSamples) {
+      if (currentLength == _vadFallbackChunkSamples) {
         flush();
       }
 
-      final available = _fileChunkSamples - currentLength;
+      final available = _vadFallbackChunkSamples - currentLength;
       final take = math.min(available, segment.length - offset);
       current.add(Float32List.sublistView(segment, offset, offset + take));
       currentLength += take;
@@ -400,11 +474,66 @@ Float32List _concatChunks(List<Float32List> chunks, int totalLength) {
   return combined;
 }
 
+Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
+  required List<IndexedAudioChunk> chunks,
+  required String modelPath,
+  required String tokensPath,
+  required int workerCount,
+  required String preferredProvider,
+}) async {
+  if (preferredProvider == _cpuProvider) {
+    return _FixedDecodeResult(
+      texts: await _decodeFixedChunks(
+        chunks: chunks,
+        modelPath: modelPath,
+        tokensPath: tokensPath,
+        workerCount: workerCount,
+        provider: _cpuProvider,
+      ),
+      requestedProvider: _cpuProvider,
+      provider: _cpuProvider,
+      fallbackReason: null,
+      qualityRetry: false,
+    );
+  }
+
+  try {
+    return _FixedDecodeResult(
+      texts: await _decodeFixedChunks(
+        chunks: chunks,
+        modelPath: modelPath,
+        tokensPath: tokensPath,
+        workerCount: workerCount,
+        provider: preferredProvider,
+      ),
+      requestedProvider: preferredProvider,
+      provider: preferredProvider,
+      fallbackReason: null,
+      qualityRetry: false,
+    );
+  } catch (error) {
+    return _FixedDecodeResult(
+      texts: await _decodeFixedChunks(
+        chunks: chunks,
+        modelPath: modelPath,
+        tokensPath: tokensPath,
+        workerCount: workerCount,
+        provider: _cpuProvider,
+      ),
+      requestedProvider: preferredProvider,
+      provider: _cpuProvider,
+      fallbackReason: _compactError(error),
+      qualityRetry: false,
+    );
+  }
+}
+
 Future<List<String>> _decodeFixedChunks({
   required List<IndexedAudioChunk> chunks,
   required String modelPath,
   required String tokensPath,
   required int workerCount,
+  required String provider,
 }) async {
   if (chunks.isEmpty) {
     return const <String>[];
@@ -415,6 +544,7 @@ Future<List<String>> _decodeFixedChunks({
       modelPath: modelPath,
       tokensPath: tokensPath,
       numThreads: _recognizerThreads,
+      provider: provider,
     );
     try {
       return mergeIndexedTranscripts(
@@ -434,6 +564,7 @@ Future<List<String>> _decodeFixedChunks({
           _FixedChunkBatchPayload(
             modelPath: modelPath,
             tokensPath: tokensPath,
+            provider: provider,
             chunks: batch,
           ),
         ),
@@ -476,6 +607,7 @@ List<IndexedTranscript> _decodeFixedChunkBatch(
     modelPath: payload.modelPath,
     tokensPath: payload.tokensPath,
     numThreads: _parallelRecognizerThreads,
+    provider: payload.provider,
   );
   try {
     return _decodeIndexedAudioChunks(recognizer, payload.chunks);
@@ -662,18 +794,58 @@ class TranscriptScore {
   final List<String> texts;
   final double score;
   final bool isLowQuality;
+
+  int get meaningfulCharacterCount {
+    var total = 0;
+    for (final text in texts) {
+      total += _meaningfulCharacterCount(text);
+    }
+    return total;
+  }
 }
 
 class _FixedChunkBatchPayload {
   const _FixedChunkBatchPayload({
     required this.modelPath,
     required this.tokensPath,
+    required this.provider,
     required this.chunks,
   });
 
   final String modelPath;
   final String tokensPath;
+  final String provider;
   final List<IndexedAudioChunk> chunks;
+}
+
+class _FixedDecodeResult {
+  const _FixedDecodeResult({
+    required this.texts,
+    required this.requestedProvider,
+    required this.provider,
+    required this.fallbackReason,
+    required this.qualityRetry,
+  });
+
+  final List<String> texts;
+  final String requestedProvider;
+  final String provider;
+  final String? fallbackReason;
+  final bool qualityRetry;
+
+  _FixedDecodeResult withQualityRetry({
+    required String selectedProvider,
+    required List<String> selectedTexts,
+    required String fallbackReason,
+  }) {
+    return _FixedDecodeResult(
+      texts: selectedTexts,
+      requestedProvider: requestedProvider,
+      provider: selectedProvider,
+      fallbackReason: fallbackReason,
+      qualityRetry: true,
+    );
+  }
 }
 
 class _AsrTimings {
@@ -697,8 +869,19 @@ class _FileTranscriptionResult {
     required this.texts,
     required this.strategy,
     required this.fixedChunkCount,
+    required this.totalFixedChunkCount,
     required this.skippedSilentChunkCount,
     required this.workerCount,
+    required this.processorCount,
+    required this.isIOS,
+    required this.requestedFixedProvider,
+    required this.fixedProvider,
+    required this.fixedProviderFallbackReason,
+    required this.fixedProviderQualityRetry,
+    required this.sampleCount,
+    required this.fixedCandidate,
+    required this.vadCandidate,
+    required this.vadSpeechSegmentCount,
     required this.vadFallbackRun,
     required this.vadFallbackSelected,
     required this.timings,
@@ -707,22 +890,63 @@ class _FileTranscriptionResult {
   final List<String> texts;
   final String strategy;
   final int fixedChunkCount;
+  final int totalFixedChunkCount;
   final int skippedSilentChunkCount;
   final int workerCount;
+  final int processorCount;
+  final bool isIOS;
+  final String requestedFixedProvider;
+  final String fixedProvider;
+  final String? fixedProviderFallbackReason;
+  final bool fixedProviderQualityRetry;
+  final int sampleCount;
+  final TranscriptScore fixedCandidate;
+  final TranscriptScore? vadCandidate;
+  final int vadSpeechSegmentCount;
   final bool vadFallbackRun;
   final bool vadFallbackSelected;
   final _AsrTimings timings;
 
-  String debugSummary(String sourceName) {
+  List<String> debugLines(String sourceName) {
     final name = sourceName.replaceAll('\n', ' ');
-    return '[ASR import] file=$name strategy=$strategy '
-        'total=${timings.totalMs}ms pcmToFloat=${timings.pcmToFloatMs}ms '
-        'preprocess=${timings.preprocessMs}ms '
-        'fixedDecode=${timings.fixedDecodeMs}ms '
-        'vadDecode=${timings.vadDecodeMs}ms fixedChunks=$fixedChunkCount '
-        'skippedSilent=$skippedSilentChunkCount workers=$workerCount '
-        'vadRun=$vadFallbackRun vadSelected=$vadFallbackSelected '
-        'segments=${texts.length}';
+    final audioSeconds = sampleCount / _sampleRate;
+    final vad = vadCandidate;
+    return <String>[
+      '[ASR import] result file=$name strategy=$strategy selectedSegments=${texts.length}',
+      '[ASR import] audio sampleRate=$_sampleRate samples=$sampleCount '
+          'duration=${audioSeconds.toStringAsFixed(2)}s platform='
+          '${isIOS ? 'ios' : 'other'} processors=$processorCount',
+      '[ASR import] chunks fixedWindow=${_fixedChunkSamples ~/ _sampleRate}s '
+          'overlap=${_fileChunkOverlapSamples ~/ _sampleRate}s '
+          'vadFallbackWindow=${_vadFallbackChunkSamples ~/ _sampleRate}s '
+          'totalFixed=$totalFixedChunkCount decodedFixed=$fixedChunkCount '
+          'skippedSilent=$skippedSilentChunkCount workers=$workerCount '
+          'parallelMinChunks=$_parallelDecodeMinChunks '
+          'workerThreads=$_parallelRecognizerThreads serialThreads=$_recognizerThreads',
+      '[ASR import] provider fixedRequested=$requestedFixedProvider '
+          'fixedUsed=$fixedProvider qualityRetry=$fixedProviderQualityRetry '
+          'fallbackReason=${fixedProviderFallbackReason ?? 'none'} '
+          'vadDecodeProvider=$_cpuProvider',
+      '[ASR import] timing total=${timings.totalMs}ms '
+          'pcmToFloat=${timings.pcmToFloatMs}ms '
+          'preprocess=${timings.preprocessMs}ms '
+          'fixedDecode=${timings.fixedDecodeMs}ms '
+          'vadDecode=${timings.vadDecodeMs}ms',
+      '[ASR import] fixedCandidate score=${fixedCandidate.score.toStringAsFixed(2)} '
+          'lowQuality=${fixedCandidate.isLowQuality} '
+          'segments=${fixedCandidate.texts.length} '
+          'chars=${fixedCandidate.meaningfulCharacterCount}',
+      if (vad == null)
+        '[ASR import] vadCandidate run=$vadFallbackRun selected=$vadFallbackSelected '
+            'speechSegments=$vadSpeechSegmentCount score=n/a lowQuality=n/a '
+            'segments=0 chars=0'
+      else
+        '[ASR import] vadCandidate run=$vadFallbackRun selected=$vadFallbackSelected '
+            'speechSegments=$vadSpeechSegmentCount '
+            'score=${vad.score.toStringAsFixed(2)} '
+            'lowQuality=${vad.isLowQuality} segments=${vad.texts.length} '
+            'chars=${vad.meaningfulCharacterCount}',
+    ];
   }
 }
 
@@ -730,6 +954,7 @@ sherpa.OfflineRecognizer _createSenseVoiceRecognizer({
   required String modelPath,
   required String tokensPath,
   required int numThreads,
+  required String provider,
 }) {
   return sherpa.OfflineRecognizer(
     sherpa.OfflineRecognizerConfig(
@@ -741,10 +966,15 @@ sherpa.OfflineRecognizer _createSenseVoiceRecognizer({
         ),
         tokens: tokensPath,
         numThreads: numThreads,
+        provider: provider,
         debug: false,
       ),
     ),
   );
+}
+
+String _compactError(Object error) {
+  return error.toString().replaceAll('\n', ' ').trim();
 }
 
 String _decodeSegment(

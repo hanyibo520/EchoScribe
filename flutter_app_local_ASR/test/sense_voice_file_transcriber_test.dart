@@ -15,10 +15,10 @@ void main() {
     final chunks = fixedOverlapChunks(samples);
 
     expect(chunks, hasLength(3));
-    expect(chunks[0].length, sampleRate * 25);
-    expect(chunks[1].length, sampleRate * 25);
-    expect(chunks[2].length, sampleRate * 14);
-    expect(chunks[0][sampleRate * 23], chunks[1].first);
+    expect(chunks[0].length, sampleRate * 30);
+    expect(chunks[1].length, sampleRate * 30);
+    expect(chunks[2].length, sampleRate * 4);
+    expect(chunks[0][sampleRate * 28], chunks[1].first);
     expect(chunks[0].last, chunks[1][sampleRate * 2 - 1]);
   });
 
@@ -89,6 +89,11 @@ void main() {
     },
   );
 
+  test('selectFixedDecodeProvider prefers CoreML only on iOS', () {
+    expect(selectFixedDecodeProvider(isIOS: true), 'coreml');
+    expect(selectFixedDecodeProvider(isIOS: false), 'cpu');
+  });
+
   test('IndexedAudioChunk payload can cross isolate boundaries', () async {
     final chunks = <IndexedAudioChunk>[
       IndexedAudioChunk(
@@ -106,9 +111,9 @@ void main() {
 
   test('decodableFixedOverlapChunks skips only digital silence chunks', () {
     const sampleRate = 16000;
-    final rawSamples = Float32List(sampleRate * 30);
-    final samples = Float32List(sampleRate * 30);
-    for (var i = sampleRate * 26; i < rawSamples.length; i += 1) {
+    final rawSamples = Float32List(sampleRate * 60);
+    final samples = Float32List(sampleRate * 60);
+    for (var i = sampleRate * 32; i < sampleRate * 45; i += 1) {
       rawSamples[i] = 0.01;
       samples[i] = 0.01;
     }

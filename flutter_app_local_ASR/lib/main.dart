@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show File;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -574,15 +575,21 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     Object? senseVoiceError;
     if (currentCheck.isSenseVoiceReady) {
       try {
+        final sourceBytes = await File(picked.path).length();
         final decodeWatch = Stopwatch()..start();
         final decoded = await LocalNativeBridge.instance.decodeAudioFileToPcm16(
           audioFilePath: picked.path,
         );
         decodeWatch.stop();
+        final pcmDurationSeconds =
+            decoded.pcm16Audio.length / 2 / decoded.sampleRate;
         debugPrint(
-          '[ASR import] file=${picked.name} audioToPcm='
-          '${decodeWatch.elapsedMilliseconds}ms pcmBytes='
-          '${decoded.pcm16Audio.length} sampleRate=${decoded.sampleRate}',
+          '[ASR import] source file=${picked.name} path=${picked.path} '
+          'sourceBytes=$sourceBytes audioToPcm='
+          '${decodeWatch.elapsedMilliseconds}ms '
+          'pcmBytes=${decoded.pcm16Audio.length} '
+          'sampleRate=${decoded.sampleRate} '
+          'pcmDuration=${pcmDurationSeconds.toStringAsFixed(2)}s',
         );
         if (decoded.pcm16Audio.isEmpty) {
           return const <AsrSegment>[];
