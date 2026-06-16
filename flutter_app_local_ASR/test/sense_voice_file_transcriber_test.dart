@@ -89,8 +89,8 @@ void main() {
     },
   );
 
-  test('selectFixedDecodeProvider prefers CoreML only on iOS', () {
-    expect(selectFixedDecodeProvider(isIOS: true), 'coreml');
+  test('selectFixedDecodeProvider defaults to CPU on all platforms', () {
+    expect(selectFixedDecodeProvider(isIOS: true), 'cpu');
     expect(selectFixedDecodeProvider(isIOS: false), 'cpu');
   });
 

@@ -428,7 +428,7 @@ int selectFixedDecodeWorkerCount({
 }
 
 String selectFixedDecodeProvider({required bool isIOS}) {
-  return isIOS ? _coreMlProvider : _cpuProvider;
+  return _cpuProvider;
 }
 
 List<Float32List> chunkSpeechSegments(List<Float32List> segments) {
