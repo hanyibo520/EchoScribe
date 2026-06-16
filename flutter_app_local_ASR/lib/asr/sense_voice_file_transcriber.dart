@@ -118,14 +118,20 @@ List<String> _transcribeSenseVoiceTextSegments({
   );
 
   try {
-    final samples = _normalize(pcm16BytesToFloat32(pcm16Audio));
+    final samples = conditionSpeechSamples(
+      pcm16BytesToFloat32(pcm16Audio),
+      sampleRate: _sampleRate,
+      targetPeak: _targetPeak,
+      maxGain: _maxGain,
+    );
     final speechSegments = _detectSpeechSegments(samples, vad);
     final segmentsToDecode = speechSegments.isEmpty
         ? _fixedChunks(samples)
         : _chunkSpeechSegments(speechSegments);
 
     final texts = _decodeSegments(recognizer, segmentsToDecode);
-    if (texts.isNotEmpty || speechSegments.isEmpty) {
+    if (speechSegments.isEmpty ||
+        !_isLowQualityTranscript(texts, sampleCount: samples.length)) {
       return texts;
     }
 
@@ -134,27 +140,6 @@ List<String> _transcribeSenseVoiceTextSegments({
     vad.free();
     recognizer.free();
   }
-}
-
-Float32List _normalize(Float32List samples) {
-  var peak = 0.0;
-  for (final sample in samples) {
-    peak = math.max(peak, sample.abs());
-  }
-  if (peak <= 0.0) {
-    return samples;
-  }
-
-  final gain = math.min(_targetPeak / peak, _maxGain);
-  if (gain <= 1.0) {
-    return samples;
-  }
-
-  final normalized = Float32List(samples.length);
-  for (var i = 0; i < samples.length; i += 1) {
-    normalized[i] = (samples[i] * gain).clamp(-1.0, 1.0).toDouble();
-  }
-  return normalized;
 }
 
 List<Float32List> _detectSpeechSegments(
@@ -257,6 +242,49 @@ List<String> _decodeSegments(
     }
   }
   return texts;
+}
+
+bool _isLowQualityTranscript(List<String> texts, {required int sampleCount}) {
+  if (texts.isEmpty) {
+    return true;
+  }
+
+  final durationSeconds = sampleCount / _sampleRate;
+  var meaningfulTotal = 0;
+  var shortSegments = 0;
+  for (final text in texts) {
+    final count = _meaningfulCharacterCount(text);
+    meaningfulTotal += count;
+    if (count <= 2) {
+      shortSegments += 1;
+    }
+  }
+
+  final shortRatio = shortSegments / texts.length;
+  final averageLength = meaningfulTotal / texts.length;
+
+  if (texts.length >= 6 && shortRatio >= 0.65 && averageLength < 4) {
+    return true;
+  }
+
+  if (durationSeconds >= 60 && meaningfulTotal < durationSeconds * 0.4) {
+    return true;
+  }
+
+  return false;
+}
+
+int _meaningfulCharacterCount(String text) {
+  var count = 0;
+  for (final rune in text.runes) {
+    if ((rune >= 0x30 && rune <= 0x39) ||
+        (rune >= 0x41 && rune <= 0x5A) ||
+        (rune >= 0x61 && rune <= 0x7A) ||
+        (rune >= 0x4E00 && rune <= 0x9FFF)) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 String _decodeSegment(
