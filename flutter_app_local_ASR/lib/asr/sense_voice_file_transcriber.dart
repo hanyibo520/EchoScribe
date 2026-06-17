@@ -72,7 +72,13 @@ class SenseVoiceFileTranscriber {
 
     final errors = <String>[];
     var sawEmptyResult = false;
-    for (final profile in profiles) {
+    for (
+      var profileIndex = 0;
+      profileIndex < profiles.length;
+      profileIndex += 1
+    ) {
+      final profile = profiles[profileIndex];
+      final hasNextProfile = profileIndex < profiles.length - 1;
       try {
         final result = await Isolate.run(
           () => _transcribeSenseVoiceTextSegments(
@@ -88,8 +94,20 @@ class SenseVoiceFileTranscriber {
           debugPrint(line);
         }
 
-        if (result.texts.isEmpty) {
-          sawEmptyResult = true;
+        final fallbackReason = fileAsrProfileFallbackReason(
+          profileId: profile.id,
+          hasNextProfile: hasNextProfile,
+          hasText: result.texts.isNotEmpty,
+          isLowQuality: result.selectedCandidate.isLowQuality,
+        );
+        if (fallbackReason != null) {
+          if (fallbackReason == 'empty_result') {
+            sawEmptyResult = true;
+          }
+          debugPrint(
+            '[ASR import] asrProfile=${profile.id} fallbackToNext '
+            'reason=$fallbackReason',
+          );
           continue;
         }
 
@@ -133,6 +151,34 @@ class SenseVoiceFileTranscriber {
   }
 }
 
+@visibleForTesting
+String? fileAsrProfileFallbackReason({
+  required String profileId,
+  required bool hasNextProfile,
+  required bool hasText,
+  required bool isLowQuality,
+}) {
+  if (!hasNextProfile) {
+    return null;
+  }
+  if (!hasText) {
+    return 'empty_result';
+  }
+  if (profileId != SenseVoiceModelProfile.standardId && isLowQuality) {
+    return 'low_quality';
+  }
+  return null;
+}
+
+@visibleForTesting
+bool shouldUseStreamingPcm16Transcription({
+  required FileAudioPreprocessingMode preprocessingMode,
+  required int sampleCount,
+}) {
+  return preprocessingMode == FileAudioPreprocessingMode.none &&
+      sampleCount >= _iosSerialSampleLimit;
+}
+
 Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   required String asrProfileId,
   required Uint8List pcm16Audio,
@@ -152,8 +198,29 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   Float32List? vadSamples;
   if (preprocessingMode == FileAudioPreprocessingMode.none) {
     sampleCount = pcm16Audio.length ~/ 2;
-    fixedChunks = decodableFixedOverlapChunksFromPcm16(pcm16Audio);
     totalFixedChunkCount = fixedOverlapChunkCount(sampleCount);
+    if (shouldUseStreamingPcm16Transcription(
+      preprocessingMode: preprocessingMode,
+      sampleCount: sampleCount,
+    )) {
+      pcmWatch.stop();
+      final preprocessWatch = Stopwatch()..start();
+      preprocessWatch.stop();
+      return _runStreamingPcm16SenseVoiceTranscription(
+        asrProfileId: asrProfileId,
+        pcm16Audio: pcm16Audio,
+        totalFixedChunkCount: totalFixedChunkCount,
+        sampleCount: sampleCount,
+        modelPath: modelPath,
+        tokensPath: tokensPath,
+        vadPath: vadPath,
+        preprocessingMode: preprocessingMode,
+        totalWatch: totalWatch,
+        pcmWatch: pcmWatch,
+        preprocessWatch: preprocessWatch,
+      );
+    }
+    fixedChunks = decodableFixedOverlapChunksFromPcm16(pcm16Audio);
     fixedChunksOwnSamples = true;
   } else {
     final rawSamples = pcm16BytesToFloat32(pcm16Audio);
@@ -212,6 +279,61 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   );
 }
 
+Future<_FileTranscriptionResult> _runStreamingPcm16SenseVoiceTranscription({
+  required String asrProfileId,
+  required Uint8List pcm16Audio,
+  required int totalFixedChunkCount,
+  required int sampleCount,
+  required String modelPath,
+  required String tokensPath,
+  required String vadPath,
+  required FileAudioPreprocessingMode preprocessingMode,
+  required Stopwatch totalWatch,
+  required Stopwatch pcmWatch,
+  required Stopwatch preprocessWatch,
+}) async {
+  final processorCount = Platform.numberOfProcessors;
+  final isIOS = Platform.isIOS;
+  final fixedWatch = Stopwatch()..start();
+  final fixedRun = _decodePcm16FixedChunksSerial(
+    pcm16Audio: pcm16Audio,
+    totalFixedChunkCount: totalFixedChunkCount,
+    asrProfileId: asrProfileId,
+    modelPath: modelPath,
+    tokensPath: tokensPath,
+    provider: selectFixedDecodeProvider(isIOS: isIOS),
+  );
+  fixedWatch.stop();
+
+  return _completeSenseVoiceTranscription(
+    asrProfileId: asrProfileId,
+    fixedDecodeResult: _FixedDecodeResult(
+      texts: fixedRun.texts,
+      profile: fixedRun.profile,
+      requestedProvider: _cpuProvider,
+      provider: _cpuProvider,
+      fallbackReason: null,
+      qualityRetry: false,
+    ),
+    fixedChunkCount: fixedRun.profile.chunks.length,
+    totalFixedChunkCount: totalFixedChunkCount,
+    workerCount: 1,
+    processorCount: processorCount,
+    isIOS: isIOS,
+    sampleCount: sampleCount,
+    modelPath: modelPath,
+    tokensPath: tokensPath,
+    vadPath: vadPath,
+    preprocessingMode: preprocessingMode,
+    initialVadSamples: null,
+    pcm16Audio: pcm16Audio,
+    totalWatch: totalWatch,
+    pcmWatch: pcmWatch,
+    preprocessWatch: preprocessWatch,
+    fixedWatch: fixedWatch,
+  );
+}
+
 Future<_FileTranscriptionResult> _runPreparedSenseVoiceTranscription({
   required String asrProfileId,
   required List<IndexedAudioChunk> fixedChunks,
@@ -247,7 +369,7 @@ Future<_FileTranscriptionResult> _runPreparedSenseVoiceTranscription({
     preferredProvider: preferredFixedProvider,
   );
 
-  var fixedCandidate = scoreTranscript(
+  final fixedCandidate = scoreTranscript(
     fixedDecodeResult.texts,
     sampleCount: sampleCount,
   );
@@ -279,12 +401,56 @@ Future<_FileTranscriptionResult> _runPreparedSenseVoiceTranscription({
           ? 'coreml_low_quality_cpu_selected'
           : 'coreml_low_quality_cpu_rejected',
     );
-    if (cpuCandidate.score >= fixedCandidate.score) {
-      fixedCandidate = cpuCandidate;
-    }
   }
   fixedWatch.stop();
-  final skippedSilentChunkCount = totalFixedChunkCount - fixedChunks.length;
+
+  return _completeSenseVoiceTranscription(
+    asrProfileId: asrProfileId,
+    fixedDecodeResult: fixedDecodeResult,
+    fixedChunkCount: fixedChunks.length,
+    totalFixedChunkCount: totalFixedChunkCount,
+    workerCount: workerCount,
+    processorCount: processorCount,
+    isIOS: isIOS,
+    sampleCount: sampleCount,
+    modelPath: modelPath,
+    tokensPath: tokensPath,
+    vadPath: vadPath,
+    preprocessingMode: preprocessingMode,
+    initialVadSamples: initialVadSamples,
+    pcm16Audio: pcm16Audio,
+    totalWatch: totalWatch,
+    pcmWatch: pcmWatch,
+    preprocessWatch: preprocessWatch,
+    fixedWatch: fixedWatch,
+  );
+}
+
+Future<_FileTranscriptionResult> _completeSenseVoiceTranscription({
+  required String asrProfileId,
+  required _FixedDecodeResult fixedDecodeResult,
+  required int fixedChunkCount,
+  required int totalFixedChunkCount,
+  required int workerCount,
+  required int processorCount,
+  required bool isIOS,
+  required int sampleCount,
+  required String modelPath,
+  required String tokensPath,
+  required String vadPath,
+  required FileAudioPreprocessingMode preprocessingMode,
+  required Float32List? initialVadSamples,
+  required Stopwatch totalWatch,
+  required Stopwatch pcmWatch,
+  required Stopwatch preprocessWatch,
+  required Stopwatch fixedWatch,
+  Uint8List? pcm16Audio,
+}) async {
+  final fixedCandidate = scoreTranscript(
+    fixedDecodeResult.texts,
+    sampleCount: sampleCount,
+  );
+  final skippedSilentChunkCount = totalFixedChunkCount - fixedChunkCount;
 
   if (!shouldRunVadFallback(fixedCandidate)) {
     totalWatch.stop();
@@ -293,7 +459,7 @@ Future<_FileTranscriptionResult> _runPreparedSenseVoiceTranscription({
       strategy: workerCount > 1
           ? 'fixed_parallel_${workerCount}w'
           : 'fixed_serial',
-      fixedChunkCount: fixedChunks.length,
+      fixedChunkCount: fixedChunkCount,
       totalFixedChunkCount: totalFixedChunkCount,
       skippedSilentChunkCount: skippedSilentChunkCount,
       workerCount: workerCount,
@@ -361,7 +527,7 @@ Future<_FileTranscriptionResult> _runPreparedSenseVoiceTranscription({
       return _FileTranscriptionResult(
         texts: fixedCandidate.texts,
         strategy: 'fixed_low_quality_no_vad_speech',
-        fixedChunkCount: fixedChunks.length,
+        fixedChunkCount: fixedChunkCount,
         totalFixedChunkCount: totalFixedChunkCount,
         skippedSilentChunkCount: skippedSilentChunkCount,
         workerCount: workerCount,
@@ -424,7 +590,7 @@ Future<_FileTranscriptionResult> _runPreparedSenseVoiceTranscription({
     strategy: vadSelected
         ? 'vad_fallback_selected'
         : 'fixed_selected_after_vad',
-    fixedChunkCount: fixedChunks.length,
+    fixedChunkCount: fixedChunkCount,
     totalFixedChunkCount: totalFixedChunkCount,
     skippedSilentChunkCount: skippedSilentChunkCount,
     workerCount: workerCount,
@@ -736,6 +902,96 @@ Float32List _concatChunks(List<Float32List> chunks, int totalLength) {
     offset += chunk.length;
   }
   return combined;
+}
+
+_FixedDecodeRun _decodePcm16FixedChunksSerial({
+  required Uint8List pcm16Audio,
+  required int totalFixedChunkCount,
+  required String asrProfileId,
+  required String modelPath,
+  required String tokensPath,
+  required String provider,
+}) {
+  final sampleCount = pcm16Audio.length ~/ 2;
+  final data = ByteData.view(
+    pcm16Audio.buffer,
+    pcm16Audio.offsetInBytes,
+    sampleCount * 2,
+  );
+  final totalWatch = Stopwatch()..start();
+  final initWatch = Stopwatch()..start();
+  final recognizer = _createSenseVoiceRecognizer(
+    modelPath: modelPath,
+    tokensPath: tokensPath,
+    numThreads: _recognizerThreads,
+    provider: provider,
+  );
+  initWatch.stop();
+
+  try {
+    final transcripts = <IndexedTranscript>[];
+    final chunkProfiles = <FixedChunkDecodeProfile>[];
+    final step = _fixedChunkSamples - _fileChunkOverlapSamples;
+    var decodedCount = 0;
+    var index = 0;
+    for (var start = 0; start < sampleCount; start += step) {
+      final end = math.min(start + _fixedChunkSamples, sampleCount);
+      if (!isNearlyDigitalSilencePcm16(
+        data,
+        startSample: start,
+        endSample: end,
+      )) {
+        final chunkWatch = Stopwatch()..start();
+        final text = _decodeSegment(
+          recognizer,
+          _pcm16ChunkToFloat32(data, startSample: start, endSample: end),
+        );
+        chunkWatch.stop();
+        decodedCount += 1;
+        chunkProfiles.add(
+          FixedChunkDecodeProfile(
+            workerIndex: 0,
+            chunkIndex: index,
+            decodeMs: chunkWatch.elapsedMilliseconds,
+            sampleCount: end - start,
+            charCount: _meaningfulCharacterCount(text),
+          ),
+        );
+        if (text.isNotEmpty) {
+          transcripts.add(IndexedTranscript(index: index, text: text));
+        }
+      }
+
+      final processedCount = index + 1;
+      if (processedCount % 12 == 0 || processedCount == totalFixedChunkCount) {
+        debugPrint(
+          '[ASR import] streamingProgress asrProfile=$asrProfileId '
+          'chunk=$processedCount/$totalFixedChunkCount decoded=$decodedCount',
+        );
+      }
+      index += 1;
+      if (end == sampleCount) {
+        break;
+      }
+    }
+
+    totalWatch.stop();
+    return _FixedDecodeRun(
+      texts: mergeIndexedTranscripts(transcripts, trimOverlaps: true),
+      profile: FixedDecodeProfile(
+        workers: <FixedWorkerDecodeProfile>[
+          FixedWorkerDecodeProfile(
+            workerIndex: 0,
+            recognizerInitMs: initWatch.elapsedMilliseconds,
+            totalMs: totalWatch.elapsedMilliseconds,
+            chunks: chunkProfiles,
+          ),
+        ],
+      ),
+    );
+  } finally {
+    recognizer.free();
+  }
 }
 
 Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
@@ -1404,6 +1660,13 @@ class _FileTranscriptionResult {
   final bool vadFallbackRun;
   final bool vadFallbackSelected;
   final _AsrTimings timings;
+
+  TranscriptScore get selectedCandidate {
+    if (vadFallbackSelected) {
+      return vadCandidate ?? fixedCandidate;
+    }
+    return fixedCandidate;
+  }
 
   List<String> debugLines(String sourceName) {
     final name = sourceName.replaceAll('\n', ' ');

@@ -86,6 +86,57 @@ void main() {
     expect(check.fastSenseVoiceFiles.model, 'fast-model');
   });
 
+  test('file ASR fast profile falls back on empty or low quality result', () {
+    expect(
+      fileAsrProfileFallbackReason(
+        profileId: SenseVoiceModelProfile.fastId,
+        hasNextProfile: true,
+        hasText: false,
+        isLowQuality: true,
+      ),
+      'empty_result',
+    );
+    expect(
+      fileAsrProfileFallbackReason(
+        profileId: SenseVoiceModelProfile.fastId,
+        hasNextProfile: true,
+        hasText: true,
+        isLowQuality: true,
+      ),
+      'low_quality',
+    );
+    expect(
+      fileAsrProfileFallbackReason(
+        profileId: SenseVoiceModelProfile.fastId,
+        hasNextProfile: true,
+        hasText: true,
+        isLowQuality: false,
+      ),
+      isNull,
+    );
+  });
+
+  test('file ASR standard profile is the final quality fallback', () {
+    expect(
+      fileAsrProfileFallbackReason(
+        profileId: SenseVoiceModelProfile.standardId,
+        hasNextProfile: false,
+        hasText: true,
+        isLowQuality: true,
+      ),
+      isNull,
+    );
+    expect(
+      fileAsrProfileFallbackReason(
+        profileId: SenseVoiceModelProfile.standardId,
+        hasNextProfile: false,
+        hasText: false,
+        isLowQuality: true,
+      ),
+      isNull,
+    );
+  });
+
   test('fixedOverlapChunks keeps a two second overlap between windows', () {
     const sampleRate = 16000;
     final samples = Float32List.fromList(
@@ -210,6 +261,30 @@ void main() {
   test('selectFixedDecodeProvider defaults to CPU on all platforms', () {
     expect(selectFixedDecodeProvider(isIOS: true), 'cpu');
     expect(selectFixedDecodeProvider(isIOS: false), 'cpu');
+  });
+
+  test('very long unprocessed file ASR uses streaming PCM16 path', () {
+    expect(
+      shouldUseStreamingPcm16Transcription(
+        preprocessingMode: FileAudioPreprocessingMode.none,
+        sampleCount: 16000 * 30 * 60,
+      ),
+      isTrue,
+    );
+    expect(
+      shouldUseStreamingPcm16Transcription(
+        preprocessingMode: FileAudioPreprocessingMode.none,
+        sampleCount: 16000 * 13 * 60,
+      ),
+      isFalse,
+    );
+    expect(
+      shouldUseStreamingPcm16Transcription(
+        preprocessingMode: FileAudioPreprocessingMode.speechConditioning,
+        sampleCount: 16000 * 30 * 60,
+      ),
+      isFalse,
+    );
   });
 
   test('IndexedAudioChunk payload can cross isolate boundaries', () async {
