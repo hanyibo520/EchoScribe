@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_app/asr/model_store.dart';
 import 'package:flutter_app/asr/sense_voice_file_transcriber.dart';
 
 void main() {
@@ -41,8 +42,48 @@ void main() {
 
     expect(
       source,
+      contains(
+        'modelProfiles: currentCheck.fileTranscriptionSenseVoiceProfiles',
+      ),
+    );
+    expect(source, contains('scope: ModelInstallScope.fastAsr'));
+    expect(
+      source,
       contains('preprocessingMode: FileAudioPreprocessingMode.none'),
     );
+  });
+
+  test('file transcription profiles prefer fast SenseVoice when ready', () {
+    final check = _modelCheck();
+
+    expect(
+      check.fileTranscriptionSenseVoiceProfiles.map((profile) => profile.id),
+      const <String>[
+        SenseVoiceModelProfile.fastId,
+        SenseVoiceModelProfile.standardId,
+      ],
+    );
+  });
+
+  test(
+    'file transcription profiles fall back to standard when fast is missing',
+    () {
+      final check = _modelCheck(
+        missingFastSenseVoiceFiles: const <String>['fast-model'],
+      );
+
+      expect(
+        check.fileTranscriptionSenseVoiceProfiles.map((profile) => profile.id),
+        const <String>[SenseVoiceModelProfile.standardId],
+      );
+    },
+  );
+
+  test('live SenseVoice profile still points at the standard model files', () {
+    final check = _modelCheck();
+
+    expect(check.senseVoiceFiles.model, 'standard-model');
+    expect(check.fastSenseVoiceFiles.model, 'fast-model');
   });
 
   test('fixedOverlapChunks keeps a two second overlap between windows', () {
@@ -132,6 +173,39 @@ void main() {
       1,
     );
   });
+
+  test(
+    'selectFixedDecodeWorkerCount caps very long iOS imports for memory',
+    () {
+      expect(
+        selectFixedDecodeWorkerCount(
+          chunkCount: 30,
+          processorCount: 6,
+          isIOS: true,
+          sampleCount: 16000 * 13 * 60,
+        ),
+        3,
+      );
+      expect(
+        selectFixedDecodeWorkerCount(
+          chunkCount: 40,
+          processorCount: 6,
+          isIOS: true,
+          sampleCount: 16000 * 20 * 60,
+        ),
+        2,
+      );
+      expect(
+        selectFixedDecodeWorkerCount(
+          chunkCount: 60,
+          processorCount: 6,
+          isIOS: true,
+          sampleCount: 16000 * 30 * 60,
+        ),
+        1,
+      );
+    },
+  );
 
   test('selectFixedDecodeProvider defaults to CPU on all platforms', () {
     expect(selectFixedDecodeProvider(isIOS: true), 'cpu');
@@ -235,6 +309,44 @@ void main() {
     expect(chunks.single.index, 1);
   });
 
+  test('decodableFixedOverlapChunksFromPcm16 converts chunks directly', () {
+    final pcm = _pcm16Bytes(const <int>[
+      0,
+      16384,
+      -16384,
+      32767,
+      8192,
+      -8192,
+      4096,
+      -4096,
+      2048,
+      -2048,
+    ]);
+
+    final chunks = decodableFixedOverlapChunksFromPcm16(pcm);
+
+    expect(chunks, hasLength(1));
+    expect(chunks.single.index, 0);
+    expect(chunks.single.samples, hasLength(10));
+    expect(chunks.single.samples[0], 0);
+    expect(chunks.single.samples[1], closeTo(0.5, 0.00001));
+    expect(chunks.single.samples[2], closeTo(-0.5, 0.00001));
+    expect(fixedOverlapChunkCount(16000 * 60), 3);
+  });
+
+  test('splitFixedDecodeBatches can avoid copying owned chunk samples', () {
+    final samples = Float32List.fromList(<double>[0.1, -0.1]);
+    final chunks = <IndexedAudioChunk>[
+      IndexedAudioChunk(index: 0, samples: samples),
+    ];
+
+    final borrowed = splitFixedDecodeBatches(chunks, 1, copySamples: false);
+    final copied = splitFixedDecodeBatches(chunks, 1);
+
+    expect(borrowed.single.single.samples, same(samples));
+    expect(copied.single.single.samples, isNot(same(samples)));
+  });
+
   test('isNearlyDigitalSilence does not skip low-volume waveform', () {
     final samples = Float32List.fromList(
       List<double>.generate(16000, (index) => index.isEven ? 0.0002 : -0.0002),
@@ -288,4 +400,38 @@ void main() {
       same(vad),
     );
   });
+}
+
+Uint8List _pcm16Bytes(List<int> values) {
+  final bytes = Uint8List(values.length * 2);
+  final data = ByteData.view(bytes.buffer);
+  for (var i = 0; i < values.length; i += 1) {
+    data.setInt16(i * 2, values[i], Endian.little);
+  }
+  return bytes;
+}
+
+ModelCheckResult _modelCheck({
+  List<String> missingSenseVoiceFiles = const <String>[],
+  List<String> missingFastSenseVoiceFiles = const <String>[],
+}) {
+  return ModelCheckResult(
+    asrRootPath: 'asr-root',
+    senseVoiceFiles: const SenseVoiceModelFiles(
+      model: 'standard-model',
+      tokens: 'standard-tokens',
+      vad: 'vad',
+    ),
+    missingSenseVoiceFiles: missingSenseVoiceFiles,
+    fastSenseVoiceFiles: const SenseVoiceModelFiles(
+      model: 'fast-model',
+      tokens: 'fast-tokens',
+      vad: 'vad',
+    ),
+    missingFastSenseVoiceFiles: missingFastSenseVoiceFiles,
+    whisperModelPath: 'whisper',
+    isWhisperModelReady: true,
+    llamaModelPath: 'llama',
+    isLlamaModelReady: true,
+  );
 }

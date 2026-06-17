@@ -6,6 +6,8 @@ Expected paths:
 
 - assets/models/asr/sensevoice/model.int8.onnx
 - assets/models/asr/sensevoice/tokens.txt
+- assets/models/asr/sensevoice_fast/model.int8.onnx (optional faster file-import profile)
+- assets/models/asr/sensevoice_fast/tokens.txt (optional faster file-import profile)
 - assets/models/asr/silero_vad.onnx
 - assets/models/asr/whisper/ggml-base.bin
 - assets/models/llm/qwen3-0.6b-q4.gguf

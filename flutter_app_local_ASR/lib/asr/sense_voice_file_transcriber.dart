@@ -21,6 +21,8 @@ const int _fileChunkOverlapSamples = _sampleRate * 2;
 const int _parallelDecodeMinChunks = 6;
 const int _parallelDecodeWorkers = 3;
 const int _parallelRecognizerThreads = 2;
+const int _iosTwoWorkerSampleLimit = _sampleRate * 15 * 60;
+const int _iosSerialSampleLimit = _sampleRate * 25 * 60;
 const double _digitalSilencePeak = 2.0 / 32768.0;
 const int _digitalSilenceMaxLoudSamples = 8;
 const String _cpuProvider = 'cpu';
@@ -49,6 +51,7 @@ class SenseVoiceFileTranscriber {
     required Uint8List pcm16Audio,
     required String sourceName,
     SenseVoiceModelFiles? modelFiles,
+    List<SenseVoiceModelProfile>? modelProfiles,
     FileAudioPreprocessingMode preprocessingMode =
         FileAudioPreprocessingMode.speechConditioning,
   }) async {
@@ -56,32 +59,66 @@ class SenseVoiceFileTranscriber {
       return const <AsrSegment>[];
     }
 
-    final files = modelFiles ?? await _senseVoiceModelFiles();
-    final result = await Isolate.run(
-      () => _transcribeSenseVoiceTextSegments(
-        pcm16Audio: pcm16Audio,
-        modelPath: files.model,
-        tokensPath: files.tokens,
-        vadPath: files.vad,
-        preprocessingMode: preprocessingMode,
-      ),
-    );
-    for (final line in result.debugLines(sourceName)) {
-      debugPrint(line);
+    final profiles =
+        modelProfiles ??
+        <SenseVoiceModelProfile>[
+          SenseVoiceModelProfile.standard(
+            modelFiles ?? await _senseVoiceModelFiles(),
+          ),
+        ];
+    if (profiles.isEmpty) {
+      return const <AsrSegment>[];
     }
 
-    final segments = <AsrSegment>[];
-    for (final text in result.texts) {
-      segments.add(
-        AsrSegment(
-          index: segments.length + 1,
-          text: text,
-          createdAt: DateTime.now(),
-          engineName: 'Sherpa-ONNX SenseVoice file: $sourceName',
-        ),
-      );
+    final errors = <String>[];
+    var sawEmptyResult = false;
+    for (final profile in profiles) {
+      try {
+        final result = await Isolate.run(
+          () => _transcribeSenseVoiceTextSegments(
+            asrProfileId: profile.id,
+            pcm16Audio: pcm16Audio,
+            modelPath: profile.files.model,
+            tokensPath: profile.files.tokens,
+            vadPath: profile.files.vad,
+            preprocessingMode: preprocessingMode,
+          ),
+        );
+        for (final line in result.debugLines(sourceName)) {
+          debugPrint(line);
+        }
+
+        if (result.texts.isEmpty) {
+          sawEmptyResult = true;
+          continue;
+        }
+
+        final segments = <AsrSegment>[];
+        for (final text in result.texts) {
+          segments.add(
+            AsrSegment(
+              index: segments.length + 1,
+              text: text,
+              createdAt: DateTime.now(),
+              engineName: 'Sherpa-ONNX ${profile.id} file: $sourceName',
+            ),
+          );
+        }
+        return segments;
+      } catch (error) {
+        final message = '${profile.id}: $error';
+        errors.add(message);
+        debugPrint('[ASR import] asrProfile=${profile.id} failed $error');
+      }
     }
-    return segments;
+
+    if (sawEmptyResult) {
+      return const <AsrSegment>[];
+    }
+    throw StateError(
+      'SenseVoice file transcription failed for all profiles.\n'
+      '${errors.join('\n')}',
+    );
   }
 
   Future<SenseVoiceModelFiles> _senseVoiceModelFiles() async {
@@ -97,6 +134,7 @@ class SenseVoiceFileTranscriber {
 }
 
 Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
+  required String asrProfileId,
   required Uint8List pcm16Audio,
   required String modelPath,
   required String tokensPath,
@@ -107,21 +145,89 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
 
   final totalWatch = Stopwatch()..start();
   final pcmWatch = Stopwatch()..start();
-  final rawSamples = pcm16BytesToFloat32(pcm16Audio);
+  late final int sampleCount;
+  late final List<IndexedAudioChunk> fixedChunks;
+  late final int totalFixedChunkCount;
+  late final bool fixedChunksOwnSamples;
+  Float32List? vadSamples;
+  if (preprocessingMode == FileAudioPreprocessingMode.none) {
+    sampleCount = pcm16Audio.length ~/ 2;
+    fixedChunks = decodableFixedOverlapChunksFromPcm16(pcm16Audio);
+    totalFixedChunkCount = fixedOverlapChunkCount(sampleCount);
+    fixedChunksOwnSamples = true;
+  } else {
+    final rawSamples = pcm16BytesToFloat32(pcm16Audio);
+    pcmWatch.stop();
+
+    final preprocessWatch = Stopwatch()..start();
+    vadSamples = preprocessFileAudioSamples(
+      rawSamples,
+      preprocessingMode: preprocessingMode,
+    );
+    preprocessWatch.stop();
+
+    sampleCount = vadSamples.length;
+    fixedChunks = decodableFixedOverlapChunks(
+      samples: vadSamples,
+      rawSamples: rawSamples,
+    );
+    totalFixedChunkCount = fixedOverlapChunkCount(sampleCount);
+    fixedChunksOwnSamples = false;
+    return _runPreparedSenseVoiceTranscription(
+      asrProfileId: asrProfileId,
+      fixedChunks: fixedChunks,
+      fixedChunksOwnSamples: fixedChunksOwnSamples,
+      totalFixedChunkCount: totalFixedChunkCount,
+      sampleCount: sampleCount,
+      modelPath: modelPath,
+      tokensPath: tokensPath,
+      vadPath: vadPath,
+      preprocessingMode: preprocessingMode,
+      initialVadSamples: vadSamples,
+      totalWatch: totalWatch,
+      pcmWatch: pcmWatch,
+      preprocessWatch: preprocessWatch,
+    );
+  }
   pcmWatch.stop();
 
   final preprocessWatch = Stopwatch()..start();
-  final samples = preprocessFileAudioSamples(
-    rawSamples,
-    preprocessingMode: preprocessingMode,
-  );
   preprocessWatch.stop();
 
-  final fixedChunks = decodableFixedOverlapChunks(
-    samples: samples,
-    rawSamples: rawSamples,
+  return _runPreparedSenseVoiceTranscription(
+    asrProfileId: asrProfileId,
+    fixedChunks: fixedChunks,
+    fixedChunksOwnSamples: fixedChunksOwnSamples,
+    totalFixedChunkCount: totalFixedChunkCount,
+    sampleCount: sampleCount,
+    modelPath: modelPath,
+    tokensPath: tokensPath,
+    vadPath: vadPath,
+    preprocessingMode: preprocessingMode,
+    initialVadSamples: vadSamples,
+    pcm16Audio: pcm16Audio,
+    totalWatch: totalWatch,
+    pcmWatch: pcmWatch,
+    preprocessWatch: preprocessWatch,
   );
-  final totalFixedChunkCount = fixedOverlapChunks(samples).length;
+}
+
+Future<_FileTranscriptionResult> _runPreparedSenseVoiceTranscription({
+  required String asrProfileId,
+  required List<IndexedAudioChunk> fixedChunks,
+  required bool fixedChunksOwnSamples,
+  required int totalFixedChunkCount,
+  required int sampleCount,
+  required String modelPath,
+  required String tokensPath,
+  required String vadPath,
+  required FileAudioPreprocessingMode preprocessingMode,
+  required Float32List? initialVadSamples,
+  required Stopwatch totalWatch,
+  required Stopwatch pcmWatch,
+  required Stopwatch preprocessWatch,
+  Uint8List? pcm16Audio,
+}) async {
   final processorCount = Platform.numberOfProcessors;
   final isIOS = Platform.isIOS;
   final preferredFixedProvider = selectFixedDecodeProvider(isIOS: isIOS);
@@ -129,10 +235,12 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
     chunkCount: fixedChunks.length,
     processorCount: processorCount,
     isIOS: isIOS,
+    sampleCount: sampleCount,
   );
   final fixedWatch = Stopwatch()..start();
   var fixedDecodeResult = await _decodeFixedChunksWithProviderFallback(
     chunks: fixedChunks,
+    chunksOwnSamples: fixedChunksOwnSamples,
     modelPath: modelPath,
     tokensPath: tokensPath,
     workerCount: workerCount,
@@ -141,12 +249,13 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
 
   var fixedCandidate = scoreTranscript(
     fixedDecodeResult.texts,
-    sampleCount: samples.length,
+    sampleCount: sampleCount,
   );
   if (fixedDecodeResult.provider == _coreMlProvider &&
       fixedCandidate.isLowQuality) {
     final cpuRun = await _decodeFixedChunks(
       chunks: fixedChunks,
+      chunksOwnSamples: fixedChunksOwnSamples,
       modelPath: modelPath,
       tokensPath: tokensPath,
       workerCount: workerCount,
@@ -154,7 +263,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
     );
     final cpuCandidate = scoreTranscript(
       cpuRun.texts,
-      sampleCount: samples.length,
+      sampleCount: sampleCount,
     );
     fixedDecodeResult = fixedDecodeResult.withQualityRetry(
       selectedProvider: cpuCandidate.score >= fixedCandidate.score
@@ -194,8 +303,9 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
       fixedProvider: fixedDecodeResult.provider,
       fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
       fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+      asrProfileId: asrProfileId,
       preprocessingMode: preprocessingMode,
-      sampleCount: samples.length,
+      sampleCount: sampleCount,
       fixedCandidate: fixedCandidate,
       fixedDecodeProfile: fixedDecodeResult.profile,
       vadCandidate: null,
@@ -215,6 +325,17 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   final vadWatch = Stopwatch()..start();
   late final TranscriptScore vadCandidate;
   var vadSpeechSegmentCount = 0;
+  var samples = initialVadSamples;
+  if (samples == null) {
+    final audio = pcm16Audio;
+    if (audio == null) {
+      throw StateError('Missing PCM audio for VAD fallback');
+    }
+    pcmWatch.start();
+    samples = pcm16BytesToFloat32(audio);
+    pcmWatch.stop();
+  }
+  final vadInputSamples = samples;
   final vad = sherpa.VoiceActivityDetector(
     config: sherpa.VadModelConfig(
       sileroVad: sherpa.SileroVadModelConfig(
@@ -232,7 +353,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   );
 
   try {
-    final speechSegments = _detectSpeechSegments(samples, vad);
+    final speechSegments = _detectSpeechSegments(vadInputSamples, vad);
     vadSpeechSegmentCount = speechSegments.length;
     if (speechSegments.isEmpty) {
       vadWatch.stop();
@@ -250,8 +371,9 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
         fixedProvider: fixedDecodeResult.provider,
         fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
         fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+        asrProfileId: asrProfileId,
         preprocessingMode: preprocessingMode,
-        sampleCount: samples.length,
+        sampleCount: sampleCount,
         fixedCandidate: fixedCandidate,
         fixedDecodeProfile: fixedDecodeResult.profile,
         vadCandidate: null,
@@ -281,7 +403,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
           chunkSpeechSegments(speechSegments),
           trimOverlaps: false,
         ),
-        sampleCount: samples.length,
+        sampleCount: sampleCount,
       );
     } finally {
       recognizer.free();
@@ -312,8 +434,9 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
     fixedProvider: fixedDecodeResult.provider,
     fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
     fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+    asrProfileId: asrProfileId,
     preprocessingMode: preprocessingMode,
-    sampleCount: samples.length,
+    sampleCount: sampleCount,
     fixedCandidate: fixedCandidate,
     fixedDecodeProfile: fixedDecodeResult.profile,
     vadCandidate: vadCandidate,
@@ -395,6 +518,22 @@ List<Float32List> fixedOverlapChunks(Float32List samples) {
   return chunks;
 }
 
+int fixedOverlapChunkCount(int sampleCount) {
+  if (sampleCount <= 0) {
+    return 0;
+  }
+
+  final step = _fixedChunkSamples - _fileChunkOverlapSamples;
+  var count = 0;
+  for (var start = 0; start < sampleCount; start += step) {
+    count += 1;
+    if (math.min(start + _fixedChunkSamples, sampleCount) == sampleCount) {
+      break;
+    }
+  }
+  return count;
+}
+
 List<IndexedAudioChunk> decodableFixedOverlapChunks({
   required Float32List samples,
   required Float32List rawSamples,
@@ -428,6 +567,48 @@ List<IndexedAudioChunk> decodableFixedOverlapChunks({
   return chunks;
 }
 
+List<IndexedAudioChunk> decodableFixedOverlapChunksFromPcm16(
+  Uint8List pcm16Audio,
+) {
+  final sampleCount = pcm16Audio.length ~/ 2;
+  if (sampleCount == 0) {
+    return const <IndexedAudioChunk>[];
+  }
+
+  final chunks = <IndexedAudioChunk>[];
+  final data = ByteData.view(
+    pcm16Audio.buffer,
+    pcm16Audio.offsetInBytes,
+    sampleCount * 2,
+  );
+  final step = _fixedChunkSamples - _fileChunkOverlapSamples;
+  var index = 0;
+  for (var start = 0; start < sampleCount; start += step) {
+    final end = math.min(start + _fixedChunkSamples, sampleCount);
+    if (!isNearlyDigitalSilencePcm16(
+      data,
+      startSample: start,
+      endSample: end,
+    )) {
+      chunks.add(
+        IndexedAudioChunk(
+          index: index,
+          samples: _pcm16ChunkToFloat32(
+            data,
+            startSample: start,
+            endSample: end,
+          ),
+        ),
+      );
+    }
+    index += 1;
+    if (end == sampleCount) {
+      break;
+    }
+  }
+  return chunks;
+}
+
 bool isNearlyDigitalSilence(Float32List samples) {
   if (samples.isEmpty) {
     return true;
@@ -445,10 +626,54 @@ bool isNearlyDigitalSilence(Float32List samples) {
   return true;
 }
 
+bool isNearlyDigitalSilencePcm16(
+  ByteData data, {
+  required int startSample,
+  required int endSample,
+}) {
+  if (endSample <= startSample) {
+    return true;
+  }
+
+  var loudSamples = 0;
+  for (
+    var sampleIndex = startSample;
+    sampleIndex < endSample;
+    sampleIndex += 1
+  ) {
+    final value = data.getInt16(sampleIndex * 2, Endian.little).abs();
+    if (value > 2) {
+      loudSamples += 1;
+      if (loudSamples > _digitalSilenceMaxLoudSamples) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+Float32List _pcm16ChunkToFloat32(
+  ByteData data, {
+  required int startSample,
+  required int endSample,
+}) {
+  final samples = Float32List(endSample - startSample);
+  for (
+    var sampleIndex = startSample;
+    sampleIndex < endSample;
+    sampleIndex += 1
+  ) {
+    samples[sampleIndex - startSample] =
+        data.getInt16(sampleIndex * 2, Endian.little) / 32768.0;
+  }
+  return samples;
+}
+
 int selectFixedDecodeWorkerCount({
   required int chunkCount,
   required int processorCount,
   required bool isIOS,
+  int sampleCount = 0,
 }) {
   if (!isIOS || chunkCount < _parallelDecodeMinChunks) {
     return 1;
@@ -456,6 +681,12 @@ int selectFixedDecodeWorkerCount({
   final availableWorkers = processorCount ~/ _parallelRecognizerThreads;
   if (availableWorkers < 2) {
     return 1;
+  }
+  if (sampleCount >= _iosSerialSampleLimit) {
+    return 1;
+  }
+  if (sampleCount >= _iosTwoWorkerSampleLimit) {
+    return math.min(2, availableWorkers);
   }
   return math.min(_parallelDecodeWorkers, availableWorkers);
 }
@@ -509,6 +740,7 @@ Float32List _concatChunks(List<Float32List> chunks, int totalLength) {
 
 Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
   required List<IndexedAudioChunk> chunks,
+  required bool chunksOwnSamples,
   required String modelPath,
   required String tokensPath,
   required int workerCount,
@@ -517,6 +749,7 @@ Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
   if (preferredProvider == _cpuProvider) {
     final run = await _decodeFixedChunks(
       chunks: chunks,
+      chunksOwnSamples: chunksOwnSamples,
       modelPath: modelPath,
       tokensPath: tokensPath,
       workerCount: workerCount,
@@ -535,6 +768,7 @@ Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
   try {
     final run = await _decodeFixedChunks(
       chunks: chunks,
+      chunksOwnSamples: chunksOwnSamples,
       modelPath: modelPath,
       tokensPath: tokensPath,
       workerCount: workerCount,
@@ -551,6 +785,7 @@ Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
   } catch (error) {
     final run = await _decodeFixedChunks(
       chunks: chunks,
+      chunksOwnSamples: chunksOwnSamples,
       modelPath: modelPath,
       tokensPath: tokensPath,
       workerCount: workerCount,
@@ -569,6 +804,7 @@ Future<_FixedDecodeResult> _decodeFixedChunksWithProviderFallback({
 
 Future<_FixedDecodeRun> _decodeFixedChunks({
   required List<IndexedAudioChunk> chunks,
+  required bool chunksOwnSamples,
   required String modelPath,
   required String tokensPath,
   required int workerCount,
@@ -616,7 +852,11 @@ Future<_FixedDecodeRun> _decodeFixedChunks({
     }
   }
 
-  final batches = splitFixedDecodeBatches(chunks, workerCount);
+  final batches = splitFixedDecodeBatches(
+    chunks,
+    workerCount,
+    copySamples: !chunksOwnSamples,
+  );
   final results = await Future.wait(<Future<_FixedChunkBatchResult>>[
     for (var workerIndex = 0; workerIndex < batches.length; workerIndex += 1)
       Isolate.run(
@@ -646,8 +886,9 @@ Future<_FixedDecodeRun> _decodeFixedChunks({
 
 List<List<IndexedAudioChunk>> splitFixedDecodeBatches(
   List<IndexedAudioChunk> chunks,
-  int workerCount,
-) {
+  int workerCount, {
+  bool copySamples = true,
+}) {
   final batchCount = math.min(workerCount, chunks.length);
   final batches = List<List<IndexedAudioChunk>>.generate(
     batchCount,
@@ -658,7 +899,9 @@ List<List<IndexedAudioChunk>> splitFixedDecodeBatches(
     batches[i % batchCount].add(
       IndexedAudioChunk(
         index: chunk.index,
-        samples: Float32List.fromList(chunk.samples),
+        samples: copySamples
+            ? Float32List.fromList(chunk.samples)
+            : chunk.samples,
       ),
     );
   }
@@ -1127,6 +1370,7 @@ class _FileTranscriptionResult {
     required this.fixedProvider,
     required this.fixedProviderFallbackReason,
     required this.fixedProviderQualityRetry,
+    required this.asrProfileId,
     required this.preprocessingMode,
     required this.sampleCount,
     required this.fixedCandidate,
@@ -1150,6 +1394,7 @@ class _FileTranscriptionResult {
   final String fixedProvider;
   final String? fixedProviderFallbackReason;
   final bool fixedProviderQualityRetry;
+  final String asrProfileId;
   final FileAudioPreprocessingMode preprocessingMode;
   final int sampleCount;
   final TranscriptScore fixedCandidate;
@@ -1166,7 +1411,8 @@ class _FileTranscriptionResult {
     final vad = vadCandidate;
     final slowestChunk = fixedDecodeProfile.slowestChunk;
     return <String>[
-      '[ASR import] result file=$name strategy=$strategy selectedSegments=${texts.length}',
+      '[ASR import] result file=$name asrProfile=$asrProfileId '
+          'strategy=$strategy selectedSegments=${texts.length}',
       '[ASR import] audio sampleRate=$_sampleRate samples=$sampleCount '
           'duration=${audioSeconds.toStringAsFixed(2)}s platform='
           '${isIOS ? 'ios' : 'other'} processors=$processorCount',

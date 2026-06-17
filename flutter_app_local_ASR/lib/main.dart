@@ -573,7 +573,14 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     var currentCheck = check;
     var currentBridgeReport = bridgeReport;
     Object? senseVoiceError;
-    if (currentCheck.isSenseVoiceReady) {
+    if (!currentCheck.isFastSenseVoiceReady) {
+      await _modelStore.installBundledModels(
+        scope: ModelInstallScope.fastAsr,
+        onProgress: (_) {},
+      );
+      currentCheck = await _modelStore.inspect();
+    }
+    if (currentCheck.hasFileTranscriptionSenseVoiceReady) {
       try {
         final sourceBytes = await File(picked.path).length();
         final decodeWatch = Stopwatch()..start();
@@ -597,7 +604,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         final segments = await _senseVoiceFileTranscriber.transcribePcm16Audio(
           pcm16Audio: decoded.pcm16Audio,
           sourceName: picked.name,
-          modelFiles: currentCheck.senseVoiceFiles,
+          modelProfiles: currentCheck.fileTranscriptionSenseVoiceProfiles,
           preprocessingMode: FileAudioPreprocessingMode.none,
         );
         if (segments.isNotEmpty) {
@@ -607,8 +614,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         senseVoiceError = error;
       }
     } else {
-      senseVoiceError =
-          'Missing SenseVoice files: ${currentCheck.missingSenseVoiceFiles.join(', ')}';
+      senseVoiceError = 'Missing SenseVoice file transcription profiles';
     }
 
     if (!currentCheck.isWhisperModelReady) {

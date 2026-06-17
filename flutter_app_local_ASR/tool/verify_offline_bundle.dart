@@ -28,27 +28,39 @@ const requiredModelFiles = <_RequiredModelFile>[
   ),
 ];
 
+const optionalModelFiles = <_RequiredModelFile>[
+  _RequiredModelFile(
+    label: 'SenseVoice fast ONNX model',
+    path: 'assets/models/asr/sensevoice_fast/model.int8.onnx',
+    minBytes: 1024 * 1024,
+  ),
+  _RequiredModelFile(
+    label: 'SenseVoice fast tokens',
+    path: 'assets/models/asr/sensevoice_fast/tokens.txt',
+    minBytes: 1024,
+  ),
+];
+
 void main() {
   final problems = <String>[];
+  final warnings = <String>[];
 
   for (final model in requiredModelFiles) {
-    final file = File(model.path);
-    if (!file.existsSync()) {
-      problems.add('Missing ${model.label}: ${model.path}');
-      continue;
+    final problem = _verifyModelFile(model);
+    if (problem != null) {
+      problems.add(problem);
     }
+  }
 
-    final bytes = file.lengthSync();
-    if (bytes < model.minBytes) {
-      problems.add(
-        '${model.label} looks too small: ${model.path} '
-        '(${_formatBytes(bytes)}, expected at least '
-        '${_formatBytes(model.minBytes)})',
-      );
-      continue;
+  for (final model in optionalModelFiles) {
+    final problem = _verifyModelFile(model);
+    if (problem != null) {
+      warnings.add(problem);
     }
+  }
 
-    stdout.writeln('OK ${model.label}: ${model.path} (${_formatBytes(bytes)})');
+  for (final warning in warnings) {
+    stdout.writeln('WARN $warning');
   }
 
   if (problems.isEmpty) {
@@ -61,6 +73,23 @@ void main() {
     stderr.writeln('- $problem');
   }
   exitCode = 1;
+}
+
+String? _verifyModelFile(_RequiredModelFile model) {
+  final file = File(model.path);
+  if (!file.existsSync()) {
+    return 'Missing ${model.label}: ${model.path}';
+  }
+
+  final bytes = file.lengthSync();
+  if (bytes < model.minBytes) {
+    return '${model.label} looks too small: ${model.path} '
+        '(${_formatBytes(bytes)}, expected at least '
+        '${_formatBytes(model.minBytes)})';
+  }
+
+  stdout.writeln('OK ${model.label}: ${model.path} (${_formatBytes(bytes)})');
+  return null;
 }
 
 String _formatBytes(int bytes) {

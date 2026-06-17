@@ -6,6 +6,7 @@ import '../native/local_native_bridge.dart';
 
 enum ModelInstallScope {
   primaryAsr,
+  fastAsr,
   detailedSummary,
   offlineTranscription,
   all,
@@ -24,6 +25,7 @@ class ModelStore {
   static const String qwenGgufModelFile = 'qwen3-0.6b-q4.gguf';
   static const String bundledModelAssetRoot = 'assets/models';
   static const int _senseVoiceModelMinBytes = 200 * 1024 * 1024;
+  static const int _fastSenseVoiceModelMinBytes = 1024 * 1024;
   static const int _senseVoiceTokensMinBytes = 1024;
   static const int _sileroVadMinBytes = 512 * 1024;
   static const int _whisperModelMinBytes = 120 * 1024 * 1024;
@@ -33,6 +35,11 @@ class ModelStore {
     final paths = await _paths();
     await paths.createDirectories();
 
+    final senseVoiceVad = await _runtimeModelPath(
+      assetDirectory: '$bundledModelAssetRoot/asr',
+      fileName: sileroVadFile,
+      installedPath: p.join(paths.asrRoot, sileroVadFile),
+    );
     final senseVoiceFiles = SenseVoiceModelFiles(
       model: await _runtimeModelPath(
         assetDirectory: '$bundledModelAssetRoot/asr/sensevoice',
@@ -44,11 +51,20 @@ class ModelStore {
         fileName: senseVoiceTokensFile,
         installedPath: p.join(paths.senseVoiceRoot, senseVoiceTokensFile),
       ),
-      vad: await _runtimeModelPath(
-        assetDirectory: '$bundledModelAssetRoot/asr',
-        fileName: sileroVadFile,
-        installedPath: p.join(paths.asrRoot, sileroVadFile),
+      vad: senseVoiceVad,
+    );
+    final fastSenseVoiceFiles = SenseVoiceModelFiles(
+      model: await _runtimeModelPath(
+        assetDirectory: '$bundledModelAssetRoot/asr/sensevoice_fast',
+        fileName: senseVoiceModelFile,
+        installedPath: p.join(paths.fastSenseVoiceRoot, senseVoiceModelFile),
       ),
+      tokens: await _runtimeModelPath(
+        assetDirectory: '$bundledModelAssetRoot/asr/sensevoice_fast',
+        fileName: senseVoiceTokensFile,
+        installedPath: p.join(paths.fastSenseVoiceRoot, senseVoiceTokensFile),
+      ),
+      vad: senseVoiceVad,
     );
     final requiredAsrFiles = <_RequiredRuntimeModel>[
       _RequiredRuntimeModel(
@@ -70,6 +86,26 @@ class ModelStore {
         missingSenseVoiceFiles.add(file.path);
       }
     }
+    final requiredFastAsrFiles = <_RequiredRuntimeModel>[
+      _RequiredRuntimeModel(
+        path: fastSenseVoiceFiles.model,
+        minBytes: _fastSenseVoiceModelMinBytes,
+      ),
+      _RequiredRuntimeModel(
+        path: fastSenseVoiceFiles.tokens,
+        minBytes: _senseVoiceTokensMinBytes,
+      ),
+      _RequiredRuntimeModel(
+        path: fastSenseVoiceFiles.vad,
+        minBytes: _sileroVadMinBytes,
+      ),
+    ];
+    final missingFastSenseVoiceFiles = <String>[];
+    for (final file in requiredFastAsrFiles) {
+      if (!_isUsableFile(file.path, minBytes: file.minBytes)) {
+        missingFastSenseVoiceFiles.add(file.path);
+      }
+    }
 
     final whisperModel = await _runtimeModelPath(
       assetDirectory: '$bundledModelAssetRoot/asr/whisper',
@@ -85,6 +121,8 @@ class ModelStore {
       asrRootPath: paths.asrRoot,
       senseVoiceFiles: senseVoiceFiles,
       missingSenseVoiceFiles: missingSenseVoiceFiles,
+      fastSenseVoiceFiles: fastSenseVoiceFiles,
+      missingFastSenseVoiceFiles: missingFastSenseVoiceFiles,
       whisperModelPath: whisperModel,
       isWhisperModelReady: _isUsableFile(
         whisperModel,
@@ -130,7 +168,7 @@ class ModelStore {
         destinationDirectory: group.destinationDirectory,
         fileNames: group.fileNames,
       );
-      if (!installed) {
+      if (!installed && group.isRequired) {
         missingAssets.add(group.assetDirectory);
       }
     }
@@ -152,76 +190,106 @@ class ModelStore {
     );
   }
 
-  List<ModelInstallGroup> _bundledGroups(
+  List<_ModelInstallGroup> _bundledGroups(
     ModelCheckResult check, {
     required _ModelPaths paths,
     required ModelInstallScope scope,
   }) {
-    final primaryAsrGroups = <ModelInstallGroup>[
-      ModelInstallGroup(
+    final primaryAsrGroups = <_ModelInstallGroup>[
+      _ModelInstallGroup(
         label: 'SenseVoice',
         assetDirectory: '$bundledModelAssetRoot/asr/sensevoice',
         destinationDirectory: paths.senseVoiceRoot,
         fileNames: const <String>[senseVoiceModelFile, senseVoiceTokensFile],
-        runtimeFilePaths: <String>[
-          check.senseVoiceFiles.model,
-          check.senseVoiceFiles.tokens,
+        runtimeModels: <_RequiredRuntimeModel>[
+          _RequiredRuntimeModel(
+            path: check.senseVoiceFiles.model,
+            minBytes: _senseVoiceModelMinBytes,
+          ),
+          _RequiredRuntimeModel(
+            path: check.senseVoiceFiles.tokens,
+            minBytes: _senseVoiceTokensMinBytes,
+          ),
         ],
       ),
-      ModelInstallGroup(
+      _ModelInstallGroup(
         label: 'Silero VAD',
         assetDirectory: '$bundledModelAssetRoot/asr',
         destinationDirectory: paths.asrRoot,
         fileNames: const <String>[sileroVadFile],
-        runtimeFilePaths: <String>[check.senseVoiceFiles.vad],
+        runtimeModels: <_RequiredRuntimeModel>[
+          _RequiredRuntimeModel(
+            path: check.senseVoiceFiles.vad,
+            minBytes: _sileroVadMinBytes,
+          ),
+        ],
       ),
     ];
-    final detailedSummaryGroups = <ModelInstallGroup>[
-      ModelInstallGroup(
+    final fastAsrGroups = <_ModelInstallGroup>[
+      _ModelInstallGroup(
+        label: 'SenseVoice fast',
+        assetDirectory: '$bundledModelAssetRoot/asr/sensevoice_fast',
+        destinationDirectory: paths.fastSenseVoiceRoot,
+        fileNames: const <String>[senseVoiceModelFile, senseVoiceTokensFile],
+        runtimeModels: <_RequiredRuntimeModel>[
+          _RequiredRuntimeModel(
+            path: check.fastSenseVoiceFiles.model,
+            minBytes: _fastSenseVoiceModelMinBytes,
+          ),
+          _RequiredRuntimeModel(
+            path: check.fastSenseVoiceFiles.tokens,
+            minBytes: _senseVoiceTokensMinBytes,
+          ),
+        ],
+        isRequired: false,
+      ),
+    ];
+    final detailedSummaryGroups = <_ModelInstallGroup>[
+      _ModelInstallGroup(
         label: 'Qwen3 0.6B GGUF',
         assetDirectory: '$bundledModelAssetRoot/llm',
         destinationDirectory: paths.llmRoot,
         fileNames: const <String>[qwenGgufModelFile],
-        runtimeFilePaths: <String>[check.llamaModelPath],
+        runtimeModels: <_RequiredRuntimeModel>[
+          _RequiredRuntimeModel(
+            path: check.llamaModelPath,
+            minBytes: _qwenGgufModelMinBytes,
+          ),
+        ],
       ),
     ];
-    final offlineTranscriptionGroups = <ModelInstallGroup>[
-      ModelInstallGroup(
+    final offlineTranscriptionGroups = <_ModelInstallGroup>[
+      _ModelInstallGroup(
         label: 'Whisper base',
         assetDirectory: '$bundledModelAssetRoot/asr/whisper',
         destinationDirectory: paths.whisperRoot,
         fileNames: const <String>[whisperModelFile],
-        runtimeFilePaths: <String>[check.whisperModelPath],
+        runtimeModels: <_RequiredRuntimeModel>[
+          _RequiredRuntimeModel(
+            path: check.whisperModelPath,
+            minBytes: _whisperModelMinBytes,
+          ),
+        ],
       ),
     ];
     return switch (scope) {
       ModelInstallScope.primaryAsr => primaryAsrGroups,
+      ModelInstallScope.fastAsr => fastAsrGroups,
       ModelInstallScope.detailedSummary => detailedSummaryGroups,
       ModelInstallScope.offlineTranscription => offlineTranscriptionGroups,
       ModelInstallScope.all => [
         ...primaryAsrGroups,
+        ...fastAsrGroups,
         ...detailedSummaryGroups,
         ...offlineTranscriptionGroups,
       ],
     };
   }
 
-  bool _needsDirectoryInstall(ModelInstallGroup group) {
-    return group.runtimeFilePaths.any(
-      (filePath) => !_isUsableRuntimeFile(filePath),
+  bool _needsDirectoryInstall(_ModelInstallGroup group) {
+    return group.runtimeModels.any(
+      (file) => !_isUsableFile(file.path, minBytes: file.minBytes),
     );
-  }
-
-  bool _isUsableRuntimeFile(String filePath) {
-    final minBytes = switch (p.basename(filePath)) {
-      senseVoiceModelFile => _senseVoiceModelMinBytes,
-      senseVoiceTokensFile => _senseVoiceTokensMinBytes,
-      sileroVadFile => _sileroVadMinBytes,
-      whisperModelFile => _whisperModelMinBytes,
-      qwenGgufModelFile => _qwenGgufModelMinBytes,
-      _ => 1,
-    };
-    return _isUsableFile(filePath, minBytes: minBytes);
   }
 
   bool _isUsableFile(String filePath, {required int minBytes}) {
@@ -248,6 +316,16 @@ class ModelStore {
         assetDirectory: '$bundledModelAssetRoot/asr/sensevoice',
         fileName: senseVoiceTokensFile,
         installedPath: p.join(paths.senseVoiceRoot, senseVoiceTokensFile),
+      ),
+      _BundledModelCopy(
+        assetDirectory: '$bundledModelAssetRoot/asr/sensevoice_fast',
+        fileName: senseVoiceModelFile,
+        installedPath: p.join(paths.fastSenseVoiceRoot, senseVoiceModelFile),
+      ),
+      _BundledModelCopy(
+        assetDirectory: '$bundledModelAssetRoot/asr/sensevoice_fast',
+        fileName: senseVoiceTokensFile,
+        installedPath: p.join(paths.fastSenseVoiceRoot, senseVoiceTokensFile),
       ),
       _BundledModelCopy(
         assetDirectory: '$bundledModelAssetRoot/asr',
@@ -290,6 +368,7 @@ class ModelStore {
     }
 
     await _deleteEmptyDirectory(paths.senseVoiceRoot);
+    await _deleteEmptyDirectory(paths.fastSenseVoiceRoot);
     await _deleteEmptyDirectory(paths.whisperRoot);
     removedBytes += await _deleteDirectoryIfExists(
       p.join(paths.llmRoot, 'qwen3-0.6b-mlx'),
@@ -361,11 +440,13 @@ class ModelStore {
     final supportPath = await _nativeBridge.applicationSupportDirectory();
     final asrRoot = p.join(supportPath, 'asr_models');
     final senseVoiceRoot = p.join(asrRoot, 'sensevoice');
+    final fastSenseVoiceRoot = p.join(asrRoot, 'sensevoice_fast');
     final whisperRoot = p.join(asrRoot, 'whisper');
     final llmRoot = p.join(supportPath, 'llm_models');
     return _ModelPaths(
       asrRoot: asrRoot,
       senseVoiceRoot: senseVoiceRoot,
+      fastSenseVoiceRoot: fastSenseVoiceRoot,
       whisperRoot: whisperRoot,
       llmRoot: llmRoot,
     );
@@ -376,36 +457,41 @@ class _ModelPaths {
   const _ModelPaths({
     required this.asrRoot,
     required this.senseVoiceRoot,
+    required this.fastSenseVoiceRoot,
     required this.whisperRoot,
     required this.llmRoot,
   });
 
   final String asrRoot;
   final String senseVoiceRoot;
+  final String fastSenseVoiceRoot;
   final String whisperRoot;
   final String llmRoot;
 
   Future<void> createDirectories() async {
     await Directory(senseVoiceRoot).create(recursive: true);
+    await Directory(fastSenseVoiceRoot).create(recursive: true);
     await Directory(whisperRoot).create(recursive: true);
     await Directory(llmRoot).create(recursive: true);
   }
 }
 
-class ModelInstallGroup {
-  const ModelInstallGroup({
+class _ModelInstallGroup {
+  const _ModelInstallGroup({
     required this.label,
     required this.assetDirectory,
     required this.destinationDirectory,
     required this.fileNames,
-    required this.runtimeFilePaths,
+    required this.runtimeModels,
+    this.isRequired = true,
   });
 
   final String label;
   final String assetDirectory;
   final String destinationDirectory;
   final List<String> fileNames;
-  final List<String> runtimeFilePaths;
+  final List<_RequiredRuntimeModel> runtimeModels;
+  final bool isRequired;
 }
 
 class _RequiredRuntimeModel {
@@ -461,11 +547,29 @@ class SenseVoiceModelFiles {
   final String vad;
 }
 
+class SenseVoiceModelProfile {
+  const SenseVoiceModelProfile({required this.id, required this.files});
+
+  const SenseVoiceModelProfile.standard(SenseVoiceModelFiles files)
+    : this(id: standardId, files: files);
+
+  const SenseVoiceModelProfile.fast(SenseVoiceModelFiles files)
+    : this(id: fastId, files: files);
+
+  static const String standardId = 'sensevoice_standard';
+  static const String fastId = 'sensevoice_fast';
+
+  final String id;
+  final SenseVoiceModelFiles files;
+}
+
 class ModelCheckResult {
   const ModelCheckResult({
     required this.asrRootPath,
     required this.senseVoiceFiles,
     required this.missingSenseVoiceFiles,
+    required this.fastSenseVoiceFiles,
+    required this.missingFastSenseVoiceFiles,
     required this.whisperModelPath,
     required this.isWhisperModelReady,
     required this.llamaModelPath,
@@ -475,12 +579,21 @@ class ModelCheckResult {
   final String asrRootPath;
   final SenseVoiceModelFiles senseVoiceFiles;
   final List<String> missingSenseVoiceFiles;
+  final SenseVoiceModelFiles fastSenseVoiceFiles;
+  final List<String> missingFastSenseVoiceFiles;
   final String whisperModelPath;
   final bool isWhisperModelReady;
   final String llamaModelPath;
   final bool isLlamaModelReady;
 
   bool get isSenseVoiceReady => missingSenseVoiceFiles.isEmpty;
+  bool get isFastSenseVoiceReady => missingFastSenseVoiceFiles.isEmpty;
+  bool get hasFileTranscriptionSenseVoiceReady =>
+      isFastSenseVoiceReady || isSenseVoiceReady;
+  List<SenseVoiceModelProfile> get fileTranscriptionSenseVoiceProfiles => [
+    if (isFastSenseVoiceReady) SenseVoiceModelProfile.fast(fastSenseVoiceFiles),
+    if (isSenseVoiceReady) SenseVoiceModelProfile.standard(senseVoiceFiles),
+  ];
   bool get hasInstallableMissingModels =>
       !isSenseVoiceReady || !isWhisperModelReady || !isLlamaModelReady;
 }
