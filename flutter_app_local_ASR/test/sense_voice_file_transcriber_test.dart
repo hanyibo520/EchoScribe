@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
@@ -6,6 +7,44 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_app/asr/sense_voice_file_transcriber.dart';
 
 void main() {
+  test('preprocessFileAudioSamples leaves samples untouched in none mode', () {
+    final samples = Float32List.fromList(<double>[0.25, 0.125, -0.5, 0.0625]);
+
+    final prepared = preprocessFileAudioSamples(
+      samples,
+      preprocessingMode: FileAudioPreprocessingMode.none,
+    );
+
+    expect(prepared, same(samples));
+    expect(prepared, <double>[0.25, 0.125, -0.5, 0.0625]);
+  });
+
+  test(
+    'preprocessFileAudioSamples applies speech conditioning when requested',
+    () {
+      final samples = Float32List.fromList(
+        List<double>.generate(1600, (index) => index.isEven ? 0.25 : 0.15),
+      );
+
+      final prepared = preprocessFileAudioSamples(
+        samples,
+        preprocessingMode: FileAudioPreprocessingMode.speechConditioning,
+      );
+
+      expect(prepared, isNot(same(samples)));
+      expect(prepared, isNot(samples));
+    },
+  );
+
+  test('imported audio path explicitly skips file preprocessing', () {
+    final source = File('lib/main.dart').readAsStringSync();
+
+    expect(
+      source,
+      contains('preprocessingMode: FileAudioPreprocessingMode.none'),
+    );
+  });
+
   test('fixedOverlapChunks keeps a two second overlap between windows', () {
     const sampleRate = 16000;
     final samples = Float32List.fromList(
@@ -67,27 +106,32 @@ void main() {
     );
   });
 
-  test(
-    'selectFixedDecodeWorkerCount enables two workers for long iOS files',
-    () {
-      expect(
-        selectFixedDecodeWorkerCount(
-          chunkCount: 6,
-          processorCount: 4,
-          isIOS: true,
-        ),
-        2,
-      );
-      expect(
-        selectFixedDecodeWorkerCount(
-          chunkCount: 6,
-          processorCount: 3,
-          isIOS: true,
-        ),
-        1,
-      );
-    },
-  );
+  test('selectFixedDecodeWorkerCount scales workers for long iOS files', () {
+    expect(
+      selectFixedDecodeWorkerCount(
+        chunkCount: 6,
+        processorCount: 6,
+        isIOS: true,
+      ),
+      3,
+    );
+    expect(
+      selectFixedDecodeWorkerCount(
+        chunkCount: 6,
+        processorCount: 4,
+        isIOS: true,
+      ),
+      2,
+    );
+    expect(
+      selectFixedDecodeWorkerCount(
+        chunkCount: 6,
+        processorCount: 3,
+        isIOS: true,
+      ),
+      1,
+    );
+  });
 
   test('selectFixedDecodeProvider defaults to CPU on all platforms', () {
     expect(selectFixedDecodeProvider(isIOS: true), 'cpu');
@@ -108,6 +152,17 @@ void main() {
 
     expect(indexes, const <int>[7]);
   });
+
+  test(
+    'FileAudioPreprocessingMode payload can cross isolate boundaries',
+    () async {
+      const mode = FileAudioPreprocessingMode.none;
+
+      final name = await Isolate.run(() => mode.name);
+
+      expect(name, 'none');
+    },
+  );
 
   test('FixedDecodeProfile summarizes workers and chunk timings', () {
     const profile = FixedDecodeProfile(

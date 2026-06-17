@@ -19,12 +19,14 @@ const int _fixedChunkSamples = _sampleRate * 30;
 const int _vadFallbackChunkSamples = _sampleRate * 25;
 const int _fileChunkOverlapSamples = _sampleRate * 2;
 const int _parallelDecodeMinChunks = 6;
-const int _parallelDecodeWorkers = 2;
+const int _parallelDecodeWorkers = 3;
 const int _parallelRecognizerThreads = 2;
 const double _digitalSilencePeak = 2.0 / 32768.0;
 const int _digitalSilenceMaxLoudSamples = 8;
 const String _cpuProvider = 'cpu';
 const String _coreMlProvider = 'coreml';
+
+enum FileAudioPreprocessingMode { none, speechConditioning }
 
 class SenseVoiceFileTranscriber {
   SenseVoiceFileTranscriber({required ModelStore modelStore})
@@ -47,6 +49,8 @@ class SenseVoiceFileTranscriber {
     required Uint8List pcm16Audio,
     required String sourceName,
     SenseVoiceModelFiles? modelFiles,
+    FileAudioPreprocessingMode preprocessingMode =
+        FileAudioPreprocessingMode.speechConditioning,
   }) async {
     if (pcm16Audio.isEmpty) {
       return const <AsrSegment>[];
@@ -59,6 +63,7 @@ class SenseVoiceFileTranscriber {
         modelPath: files.model,
         tokensPath: files.tokens,
         vadPath: files.vad,
+        preprocessingMode: preprocessingMode,
       ),
     );
     for (final line in result.debugLines(sourceName)) {
@@ -96,6 +101,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   required String modelPath,
   required String tokensPath,
   required String vadPath,
+  required FileAudioPreprocessingMode preprocessingMode,
 }) async {
   sherpa.initBindings();
 
@@ -105,11 +111,9 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
   pcmWatch.stop();
 
   final preprocessWatch = Stopwatch()..start();
-  final samples = conditionSpeechSamples(
+  final samples = preprocessFileAudioSamples(
     rawSamples,
-    sampleRate: _sampleRate,
-    targetPeak: _targetPeak,
-    maxGain: _maxGain,
+    preprocessingMode: preprocessingMode,
   );
   preprocessWatch.stop();
 
@@ -190,6 +194,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
       fixedProvider: fixedDecodeResult.provider,
       fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
       fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+      preprocessingMode: preprocessingMode,
       sampleCount: samples.length,
       fixedCandidate: fixedCandidate,
       fixedDecodeProfile: fixedDecodeResult.profile,
@@ -245,6 +250,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
         fixedProvider: fixedDecodeResult.provider,
         fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
         fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+        preprocessingMode: preprocessingMode,
         sampleCount: samples.length,
         fixedCandidate: fixedCandidate,
         fixedDecodeProfile: fixedDecodeResult.profile,
@@ -306,6 +312,7 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
     fixedProvider: fixedDecodeResult.provider,
     fixedProviderFallbackReason: fixedDecodeResult.fallbackReason,
     fixedProviderQualityRetry: fixedDecodeResult.qualityRetry,
+    preprocessingMode: preprocessingMode,
     sampleCount: samples.length,
     fixedCandidate: fixedCandidate,
     fixedDecodeProfile: fixedDecodeResult.profile,
@@ -321,6 +328,22 @@ Future<_FileTranscriptionResult> _transcribeSenseVoiceTextSegments({
       totalMs: totalWatch.elapsedMilliseconds,
     ),
   );
+}
+
+@visibleForTesting
+Float32List preprocessFileAudioSamples(
+  Float32List rawSamples, {
+  required FileAudioPreprocessingMode preprocessingMode,
+}) {
+  return switch (preprocessingMode) {
+    FileAudioPreprocessingMode.none => rawSamples,
+    FileAudioPreprocessingMode.speechConditioning => conditionSpeechSamples(
+      rawSamples,
+      sampleRate: _sampleRate,
+      targetPeak: _targetPeak,
+      maxGain: _maxGain,
+    ),
+  };
 }
 
 List<Float32List> _detectSpeechSegments(
@@ -430,10 +453,11 @@ int selectFixedDecodeWorkerCount({
   if (!isIOS || chunkCount < _parallelDecodeMinChunks) {
     return 1;
   }
-  if (processorCount < _parallelDecodeWorkers * _parallelRecognizerThreads) {
+  final availableWorkers = processorCount ~/ _parallelRecognizerThreads;
+  if (availableWorkers < 2) {
     return 1;
   }
-  return _parallelDecodeWorkers;
+  return math.min(_parallelDecodeWorkers, availableWorkers);
 }
 
 String selectFixedDecodeProvider({required bool isIOS}) {
@@ -1103,6 +1127,7 @@ class _FileTranscriptionResult {
     required this.fixedProvider,
     required this.fixedProviderFallbackReason,
     required this.fixedProviderQualityRetry,
+    required this.preprocessingMode,
     required this.sampleCount,
     required this.fixedCandidate,
     required this.fixedDecodeProfile,
@@ -1125,6 +1150,7 @@ class _FileTranscriptionResult {
   final String fixedProvider;
   final String? fixedProviderFallbackReason;
   final bool fixedProviderQualityRetry;
+  final FileAudioPreprocessingMode preprocessingMode;
   final int sampleCount;
   final TranscriptScore fixedCandidate;
   final FixedDecodeProfile fixedDecodeProfile;
@@ -1155,7 +1181,8 @@ class _FileTranscriptionResult {
           'fixedUsed=$fixedProvider qualityRetry=$fixedProviderQualityRetry '
           'fallbackReason=${fixedProviderFallbackReason ?? 'none'} '
           'vadDecodeProvider=$_cpuProvider',
-      '[ASR import] timing total=${timings.totalMs}ms '
+      '[ASR import] timing preprocessMode=${preprocessingMode.name} '
+          'total=${timings.totalMs}ms '
           'pcmToFloat=${timings.pcmToFloatMs}ms '
           'preprocess=${timings.preprocessMs}ms '
           'fixedDecode=${timings.fixedDecodeMs}ms '

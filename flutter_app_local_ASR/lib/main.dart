@@ -598,6 +598,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
           pcm16Audio: decoded.pcm16Audio,
           sourceName: picked.name,
           modelFiles: currentCheck.senseVoiceFiles,
+          preprocessingMode: FileAudioPreprocessingMode.none,
         );
         if (segments.isNotEmpty) {
           return segments;
