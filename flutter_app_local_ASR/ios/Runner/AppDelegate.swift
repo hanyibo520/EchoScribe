@@ -17,6 +17,9 @@ private enum NativeBridgeFailure: Error {
   private var nativeBridgeChannel: FlutterMethodChannel?
   private var moonshineTranscriber: MicTranscriber?
   private var moonshineModelPath: String?
+  private var moonshineFileTranscribers: [Transcriber] = []
+  private var moonshineFileModelPath: String?
+  private let moonshineFileTranscriberLock = NSLock()
   private var isMoonshineListening = false
   private let moonshineRequiredFiles = [
     "adapter.ort",
@@ -421,6 +424,10 @@ private enum NativeBridgeFailure: Error {
     try? stopMoonshine()
     moonshineTranscriber = nil
     moonshineModelPath = nil
+    moonshineFileTranscriberLock.lock()
+    moonshineFileTranscribers = []
+    moonshineFileModelPath = nil
+    moonshineFileTranscriberLock.unlock()
     isMoonshineListening = false
   }
 
@@ -453,6 +460,28 @@ private enum NativeBridgeFailure: Error {
     moonshineModelPath = modelPath
     sendMoonshineEvent("moonshineStatus", text: "Moonshine initialized")
     return transcriber
+  }
+
+  private func ensureMoonshineFileTranscribers(
+    modelPath: String,
+    count: Int
+  ) throws -> ([Transcriber], Int) {
+    if moonshineFileModelPath != modelPath {
+      moonshineFileTranscribers = []
+      moonshineFileModelPath = modelPath
+    }
+
+    var createdCount = 0
+    while moonshineFileTranscribers.count < count {
+      moonshineFileTranscribers.append(
+        try Transcriber(
+          modelPath: modelPath,
+          modelArch: ModelArch.tinyStreaming
+        )
+      )
+      createdCount += 1
+    }
+    return (Array(moonshineFileTranscribers.prefix(count)), createdCount)
   }
 
   private func sendMoonshineEvent(_ method: String, text: String) {
@@ -849,6 +878,7 @@ private enum NativeBridgeFailure: Error {
   }
 
   private func transcribeAudioFileWithMoonshine(arguments: Any?) throws -> [String: Any] {
+    let totalStartedAt = timingNow()
     guard let values = arguments as? [String: Any] else {
       throw NativeBridgeFailure.invalidArguments("Missing Moonshine file arguments")
     }
@@ -863,37 +893,93 @@ private enum NativeBridgeFailure: Error {
     }
 
     let resolvedModelPath = try validateMoonshineModelPath(modelPath)
+    let decodeStartedAt = timingNow()
     let samples = try decodeAudioFileSamples(filePath: audioFilePath)
+    let decodeMs = timingMilliseconds(since: decodeStartedAt)
     if samples.isEmpty {
+      print(
+        "[ASR timing] native engine=Moonshine decodeMs=\(decodeMs) initMs=0 "
+        + "inferMs=0 parseMs=0 totalMs=\(timingMilliseconds(since: totalStartedAt)) "
+        + "audioDurationMs=0 rtf=0.000 reused=false segments=0 samples=0"
+      )
       return ["segments": []]
     }
 
-    let transcriber = try Transcriber(
-      modelPath: resolvedModelPath,
-      modelArch: ModelArch.tinyStreaming
-    )
+    let audioDurationMs = Int((Double(samples.count) / 16000.0) * 1000.0)
+    let lockWaitStartedAt = timingNow()
+    moonshineFileTranscriberLock.lock()
+    let lockWaitMs = timingMilliseconds(since: lockWaitStartedAt)
     defer {
-      transcriber.close()
+      moonshineFileTranscriberLock.unlock()
     }
+
+    let initStartedAt = timingNow()
+    let (transcribers, createdTranscriberCount) = try ensureMoonshineFileTranscribers(
+      modelPath: resolvedModelPath,
+      count: 1
+    )
+    let initMs = timingMilliseconds(since: initStartedAt)
+
+    let inferStartedAt = timingNow()
+    let transcriber = transcribers[0]
     let transcript = try transcriber.transcribeWithoutStreaming(
       audioData: samples,
       sampleRate: 16000
     )
-    let segments = transcript.lines.compactMap { line -> [String: Any]? in
-      let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
-      if text.isEmpty {
-        return nil
-      }
-      return [
-        "text": text,
-        "startTimeSeconds": Double(line.startTime),
-        "durationSeconds": Double(line.duration)
-      ]
-    }
+    let inferMs = timingMilliseconds(since: inferStartedAt)
+
+    let parseStartedAt = timingNow()
+    let segments = moonshineSegments(from: transcript)
+    let parseMs = timingMilliseconds(since: parseStartedAt)
+    let totalMs = timingMilliseconds(since: totalStartedAt)
+    let rtf = audioDurationMs > 0 ? Double(totalMs) / Double(audioDurationMs) : 0.0
+    print(
+      "[ASR timing] native engine=Moonshine decodeMs=\(decodeMs) "
+      + "initMs=\(initMs) inferMs=\(inferMs) parseMs=\(parseMs) "
+      + "lockWaitMs=\(lockWaitMs) totalMs=\(totalMs) audioDurationMs=\(audioDurationMs) "
+      + "rtf=\(String(format: "%.3f", rtf)) reused=\(createdTranscriberCount == 0) "
+      + "createdTranscribers=\(createdTranscriberCount) chunks=1 mode=full "
+      + "segments=\(segments.count) samples=\(samples.count)"
+    )
     return [
       "segments": segments,
       "text": segments.compactMap { $0["text"] as? String }.joined(separator: "\n")
     ]
+  }
+
+  private func moonshineSegments(
+    from transcript: Transcript,
+    offsetSeconds: Double = 0,
+    minimumStartSeconds: Double? = nil,
+    maximumStartSeconds: Double? = nil
+  ) -> [[String: Any]] {
+    return transcript.lines.compactMap { line -> [String: Any]? in
+      let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      if text.isEmpty {
+        return nil
+      }
+      let absoluteStartSeconds = Double(line.startTime) + offsetSeconds
+      if let minimumStartSeconds, absoluteStartSeconds < minimumStartSeconds {
+        return nil
+      }
+      if let maximumStartSeconds, absoluteStartSeconds >= maximumStartSeconds {
+        return nil
+      }
+      return [
+        "text": text,
+        "startTimeSeconds": absoluteStartSeconds,
+        "durationSeconds": Double(line.duration)
+      ]
+    }
+  }
+
+  private func timingNow() -> UInt64 {
+    return DispatchTime.now().uptimeNanoseconds
+  }
+
+  private func timingMilliseconds(since startedAt: UInt64) -> Int {
+    let elapsed = DispatchTime.now().uptimeNanoseconds - startedAt
+    return Int(elapsed / 1_000_000)
   }
 
   private func decodeAudioFileToPcm16(arguments: Any?) throws -> [String: Any] {

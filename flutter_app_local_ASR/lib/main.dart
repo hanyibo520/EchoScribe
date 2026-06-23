@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show File;
+import 'dart:io' show File, FileSystemException;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -607,19 +607,38 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     required NativeBridgeReport bridgeReport,
     required AppStrings strings,
   }) async {
+    final totalWatch = Stopwatch()..start();
+    final sourceBytes = await _safeFileLength(picked.path);
+    debugPrint(
+      '[ASR timing] import start file=${picked.name} path=${picked.path} '
+      'sourceBytes=$sourceBytes',
+    );
     var currentCheck = check;
     var currentBridgeReport = bridgeReport;
     Object? moonshineError;
     Object? senseVoiceError;
     if (currentCheck.isMoonshineTinyStreamingReady &&
         currentBridgeReport.moonshine.isAvailable) {
+      final moonshineWatch = Stopwatch()..start();
       try {
         final moonshineSegments = await LocalNativeBridge.instance
             .transcribeAudioFileWithMoonshine(
               modelPath: currentCheck.moonshineTinyStreamingFiles.directory,
               audioFilePath: picked.path,
             );
+        moonshineWatch.stop();
+        debugPrint(
+          '[ASR timing] import engine=Moonshine elapsedMs='
+          '${moonshineWatch.elapsedMilliseconds} segments='
+          '${moonshineSegments.length} chars='
+          '${_segmentTextLength(moonshineSegments.map((segment) => segment.text))}',
+        );
         if (moonshineSegments.isNotEmpty) {
+          totalWatch.stop();
+          debugPrint(
+            '[ASR timing] import done engine=Moonshine totalMs='
+            '${totalWatch.elapsedMilliseconds} file=${picked.name}',
+          );
           return [
             for (var i = 0; i < moonshineSegments.length; i += 1)
               AsrSegment(
@@ -631,8 +650,12 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
           ];
         }
       } catch (error) {
+        moonshineWatch.stop();
         moonshineError = error;
-        debugPrint('[ASR import] moonshine file transcription failed $error');
+        debugPrint(
+          '[ASR timing] import engine=Moonshine failed elapsedMs='
+          '${moonshineWatch.elapsedMilliseconds} error=$error',
+        );
       }
     }
 
@@ -644,8 +667,8 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       currentCheck = await _modelStore.inspect();
     }
     if (currentCheck.hasFileTranscriptionSenseVoiceReady) {
+      final senseVoiceWatch = Stopwatch()..start();
       try {
-        final sourceBytes = await File(picked.path).length();
         final decodeWatch = Stopwatch()..start();
         final decoded = await LocalNativeBridge.instance.decodeAudioFileToPcm16(
           audioFilePath: picked.path,
@@ -664,17 +687,38 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         if (decoded.pcm16Audio.isEmpty) {
           return const <AsrSegment>[];
         }
+        final senseVoiceDecodeWatch = Stopwatch()..start();
         final segments = await _senseVoiceFileTranscriber.transcribePcm16Audio(
           pcm16Audio: decoded.pcm16Audio,
           sourceName: picked.name,
           modelProfiles: currentCheck.fileTranscriptionSenseVoiceProfiles,
           preprocessingMode: FileAudioPreprocessingMode.none,
         );
+        senseVoiceDecodeWatch.stop();
+        senseVoiceWatch.stop();
+        debugPrint(
+          '[ASR timing] import engine=SenseVoice elapsedMs='
+          '${senseVoiceWatch.elapsedMilliseconds} decodeMs='
+          '${decodeWatch.elapsedMilliseconds} asrMs='
+          '${senseVoiceDecodeWatch.elapsedMilliseconds} segments='
+          '${segments.length} chars='
+          '${_segmentTextLength(segments.map((segment) => segment.text))}',
+        );
         if (segments.isNotEmpty) {
+          totalWatch.stop();
+          debugPrint(
+            '[ASR timing] import done engine=SenseVoice totalMs='
+            '${totalWatch.elapsedMilliseconds} file=${picked.name}',
+          );
           return segments;
         }
       } catch (error) {
+        senseVoiceWatch.stop();
         senseVoiceError = error;
+        debugPrint(
+          '[ASR timing] import engine=SenseVoice failed elapsedMs='
+          '${senseVoiceWatch.elapsedMilliseconds} error=$error',
+        );
       }
     } else {
       senseVoiceError = 'Missing SenseVoice file transcription profiles';
@@ -714,17 +758,28 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       );
     }
 
+    final whisperWatch = Stopwatch()..start();
     final text = await LocalNativeBridge.instance
         .transcribeAudioFileWithWhisperCpp(
           modelPath: currentCheck.whisperModelPath,
           audioFilePath: picked.path,
           languageCode: strings.isZh ? 'zh' : 'en',
         );
+    whisperWatch.stop();
     final trimmed = text.trim();
+    debugPrint(
+      '[ASR timing] import engine=Whisper elapsedMs='
+      '${whisperWatch.elapsedMilliseconds} chars=${trimmed.length}',
+    );
     if (trimmed.isEmpty) {
       return const <AsrSegment>[];
     }
 
+    totalWatch.stop();
+    debugPrint(
+      '[ASR timing] import done engine=Whisper totalMs='
+      '${totalWatch.elapsedMilliseconds} file=${picked.name}',
+    );
     return [
       AsrSegment(
         index: 1,
@@ -733,6 +788,22 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         engineName: 'whisper.cpp file: ${picked.name}',
       ),
     ];
+  }
+
+  Future<int> _safeFileLength(String path) async {
+    try {
+      return await File(path).length();
+    } on FileSystemException {
+      return -1;
+    }
+  }
+
+  int _segmentTextLength(Iterable<String> texts) {
+    var length = 0;
+    for (final text in texts) {
+      length += text.trim().length;
+    }
+    return length;
   }
 
   String _fileAsrFallbackPrefix(Object? moonshineError) {
@@ -766,14 +837,26 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
   Future<void> _toggleRecording() async {
     if (_isRecording) {
+      final engineName = _asrService.activeEngineName;
+      final recordingStartedAt = _recordingStartedAt;
+      final stopWatch = Stopwatch()..start();
       setState(() {
         _isStoppingRecording = true;
         _status = _StatusMessage((strings) => strings.stoppingRecording);
       });
       await _asrService.stop();
+      stopWatch.stop();
       await Future<void>.delayed(Duration.zero);
       final capturedSegments = _buildSegmentsToPersist();
-      final engineName = _asrService.activeEngineName;
+      final recordedMs = recordingStartedAt == null
+          ? 0
+          : DateTime.now().difference(recordingStartedAt).inMilliseconds;
+      debugPrint(
+        '[ASR timing] live stop engine=${engineName ?? 'unknown'} '
+        'recordedMs=$recordedMs stopMs=${stopWatch.elapsedMilliseconds} '
+        'segments=${capturedSegments.length} chars='
+        '${_segmentTextLength(capturedSegments.map((segment) => segment.text))}',
+      );
       setState(() {
         _isRecording = false;
         _isStoppingRecording = false;
@@ -798,8 +881,10 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     }
 
     try {
+      final prepareWatch = Stopwatch()..start();
       final result = await _modelStore.inspect();
       final bridgeReport = await _inspectNativeBridges(result);
+      prepareWatch.stop();
       setState(() {
         _modelCheck = result;
         _nativeBridgeReport = bridgeReport;
@@ -808,7 +893,14 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         _recordingStartedAt = DateTime.now();
       });
 
+      final startWatch = Stopwatch()..start();
       await _asrService.start();
+      startWatch.stop();
+      debugPrint(
+        '[ASR timing] live start engine=${_asrService.activeEngineName ?? 'unknown'} '
+        'prepareMs=${prepareWatch.elapsedMilliseconds} '
+        'startMs=${startWatch.elapsedMilliseconds}',
+      );
       setState(() {
         _isRecording = true;
         _status = _StatusMessage(
