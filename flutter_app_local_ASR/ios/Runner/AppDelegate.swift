@@ -888,6 +888,8 @@ private enum NativeBridgeFailure: Error {
     guard let audioFilePath = values["audioFilePath"] as? String, !audioFilePath.isEmpty else {
       throw NativeBridgeFailure.invalidArguments("Missing audio file path")
     }
+    let requestedSpeedFactor = values["speedFactor"] as? Double ?? 1.0
+    let speedFactor = min(max(requestedSpeedFactor, 1.0), 1.5)
     guard FileManager.default.fileExists(atPath: audioFilePath) else {
       throw NativeBridgeFailure.invalidArguments("Missing audio file at \(audioFilePath)")
     }
@@ -897,11 +899,20 @@ private enum NativeBridgeFailure: Error {
     let samples = try decodeAudioFileSamples(filePath: audioFilePath)
     let decodeMs = timingMilliseconds(since: decodeStartedAt)
     if samples.isEmpty {
-      print(
-        "[ASR timing] native engine=Moonshine decodeMs=\(decodeMs) initMs=0 "
-        + "inferMs=0 parseMs=0 totalMs=\(timingMilliseconds(since: totalStartedAt)) "
-        + "audioDurationMs=0 rtf=0.000 reused=false segments=0 samples=0"
-      )
+      print([
+        "[ASR timing] native engine=Moonshine",
+        "decodeMs=\(decodeMs)",
+        "initMs=0",
+        "inferMs=0",
+        "parseMs=0",
+        "totalMs=\(timingMilliseconds(since: totalStartedAt))",
+        "audioDurationMs=0",
+        "rtf=0.000",
+        "speedFactor=\(formatDouble(speedFactor))",
+        "reused=false",
+        "segments=0",
+        "samples=0"
+      ].joined(separator: " "))
       return ["segments": []]
     }
 
@@ -922,25 +933,59 @@ private enum NativeBridgeFailure: Error {
 
     let inferStartedAt = timingNow()
     let transcriber = transcribers[0]
+    let sampleRate = Int32((16000.0 * speedFactor).rounded())
     let transcript = try transcriber.transcribeWithoutStreaming(
       audioData: samples,
-      sampleRate: 16000
+      sampleRate: sampleRate
     )
     let inferMs = timingMilliseconds(since: inferStartedAt)
 
     let parseStartedAt = timingNow()
-    let segments = moonshineSegments(from: transcript)
+    var segments = moonshineSegments(from: transcript, timeScale: speedFactor)
+    let fastSegmentCount = segments.count
+    let fastCharacterCount = moonshineCharacterCount(segments: segments)
+    var fallbackNormalSpeed = false
+    var fallbackInferMs = 0
+    if speedFactor > 1.0,
+       moonshineFastResultNeedsFallback(
+        segments: segments,
+        audioDurationMs: audioDurationMs
+       ) {
+      let fallbackStartedAt = timingNow()
+      let fallbackTranscript = try transcriber.transcribeWithoutStreaming(
+        audioData: samples,
+        sampleRate: 16000
+      )
+      fallbackInferMs = timingMilliseconds(since: fallbackStartedAt)
+      segments = moonshineSegments(from: fallbackTranscript)
+      fallbackNormalSpeed = true
+    }
     let parseMs = timingMilliseconds(since: parseStartedAt)
     let totalMs = timingMilliseconds(since: totalStartedAt)
     let rtf = audioDurationMs > 0 ? Double(totalMs) / Double(audioDurationMs) : 0.0
-    print(
-      "[ASR timing] native engine=Moonshine decodeMs=\(decodeMs) "
-      + "initMs=\(initMs) inferMs=\(inferMs) parseMs=\(parseMs) "
-      + "lockWaitMs=\(lockWaitMs) totalMs=\(totalMs) audioDurationMs=\(audioDurationMs) "
-      + "rtf=\(String(format: "%.3f", rtf)) reused=\(createdTranscriberCount == 0) "
-      + "createdTranscribers=\(createdTranscriberCount) chunks=1 mode=full "
-      + "segments=\(segments.count) samples=\(samples.count)"
-    )
+    print([
+      "[ASR timing] native engine=Moonshine",
+      "decodeMs=\(decodeMs)",
+      "initMs=\(initMs)",
+      "inferMs=\(inferMs)",
+      "parseMs=\(parseMs)",
+      "lockWaitMs=\(lockWaitMs)",
+      "totalMs=\(totalMs)",
+      "audioDurationMs=\(audioDurationMs)",
+      "rtf=\(String(format: "%.3f", rtf))",
+      "reused=\(createdTranscriberCount == 0)",
+      "createdTranscribers=\(createdTranscriberCount)",
+      "chunks=1",
+      "mode=full",
+      "speedFactor=\(formatDouble(speedFactor))",
+      "sampleRate=\(sampleRate)",
+      "fastSegments=\(fastSegmentCount)",
+      "fastChars=\(fastCharacterCount)",
+      "fallbackNormalSpeed=\(fallbackNormalSpeed)",
+      "fallbackInferMs=\(fallbackInferMs)",
+      "segments=\(segments.count)",
+      "samples=\(samples.count)"
+    ].joined(separator: " "))
     return [
       "segments": segments,
       "text": segments.compactMap { $0["text"] as? String }.joined(separator: "\n")
@@ -951,7 +996,8 @@ private enum NativeBridgeFailure: Error {
     from transcript: Transcript,
     offsetSeconds: Double = 0,
     minimumStartSeconds: Double? = nil,
-    maximumStartSeconds: Double? = nil
+    maximumStartSeconds: Double? = nil,
+    timeScale: Double = 1.0
   ) -> [[String: Any]] {
     return transcript.lines.compactMap { line -> [String: Any]? in
       let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -967,10 +1013,35 @@ private enum NativeBridgeFailure: Error {
       }
       return [
         "text": text,
-        "startTimeSeconds": absoluteStartSeconds,
-        "durationSeconds": Double(line.duration)
+        "startTimeSeconds": absoluteStartSeconds * timeScale,
+        "durationSeconds": Double(line.duration) * timeScale
       ]
     }
+  }
+
+  private func moonshineCharacterCount(segments: [[String: Any]]) -> Int {
+    return segments.reduce(0) { total, segment in
+      let text = segment["text"] as? String ?? ""
+      return total + text.trimmingCharacters(in: .whitespacesAndNewlines).count
+    }
+  }
+
+  private func moonshineFastResultNeedsFallback(
+    segments: [[String: Any]],
+    audioDurationMs: Int
+  ) -> Bool {
+    guard audioDurationMs >= 120_000 else {
+      return false
+    }
+    let durationMinutes = max(1, audioDurationMs / 60_000)
+    let minimumSegments = max(4, min(20, durationMinutes))
+    let minimumCharacters = max(120, durationMinutes * 30)
+    return segments.count < minimumSegments ||
+      moonshineCharacterCount(segments: segments) < minimumCharacters
+  }
+
+  private func formatDouble(_ value: Double) -> String {
+    return String(format: "%.2f", value)
   }
 
   private func timingNow() -> UInt64 {
