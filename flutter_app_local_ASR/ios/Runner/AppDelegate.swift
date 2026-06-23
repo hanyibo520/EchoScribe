@@ -74,6 +74,20 @@ private enum NativeBridgeFailure: Error {
         }
       case "inspectBridges":
         result(self.inspectBridges(arguments: call.arguments))
+      case "checkMoonshine":
+        result(self.moonshineUnavailableStatus())
+      case "startMoonshine":
+        result(
+          FlutterError(
+            code: "MOONSHINE_UNAVAILABLE",
+            message: "Moonshine runtime is not linked into the iOS target",
+            details: nil
+          )
+        )
+      case "stopMoonshine":
+        result(nil)
+      case "disposeMoonshine":
+        result(nil)
       case "pickAudioFile":
         self.pickAudioFile(result: result)
       case "installBundledDirectory":
@@ -276,7 +290,15 @@ private enum NativeBridgeFailure: Error {
           "llama_backend_init"
         ],
         callableWhenLinked: true
-      )
+      ),
+      "moonshine": moonshineUnavailableStatus()
+    ]
+  }
+
+  private func moonshineUnavailableStatus() -> [String: Any] {
+    [
+      "available": false,
+      "reason": "Moonshine runtime is not linked into the iOS target"
     ]
   }
 

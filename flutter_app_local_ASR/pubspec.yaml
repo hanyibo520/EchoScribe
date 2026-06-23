@@ -74,6 +74,7 @@ flutter:
     - assets/models/asr/sensevoice/model.int8.onnx
     - assets/models/asr/sensevoice/tokens.txt
     - assets/models/asr/sensevoice_fast/
+    - assets/models/asr/moonshine_tiny_streaming_en/
     - assets/models/asr/whisper/ggml-base.bin
     - assets/models/llm/qwen3-0.6b-q4.gguf
     - assets/templates/

@@ -7,6 +7,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'asr/asr_engine.dart';
 import 'asr/fallback_asr_service.dart';
 import 'asr/model_store.dart';
+import 'asr/moonshine_asr_engine.dart';
 import 'asr/partial_preview.dart';
 import 'asr/sense_voice_file_transcriber.dart';
 import 'asr/sherpa_sense_voice_asr_service.dart';
@@ -154,6 +155,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     _modelStore = ModelStore();
     _asrService = FallbackAsrService(
       engines: [
+        MoonshineAsrEngine(modelStore: _modelStore),
         SherpaSenseVoiceAsrService(modelStore: _modelStore),
         WhisperCppAsrEngine(modelStore: _modelStore),
         SystemAsrEngine(),
@@ -255,9 +257,9 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
     final strings = AppStrings.of(context);
     final session = await RecordingDatabase.instance.saveRecording(
-      title: title ?? await RecordingDatabase.instance.nextDefaultTitle(
-        isZh: strings.isZh,
-      ),
+      title:
+          title ??
+          await RecordingDatabase.instance.nextDefaultTitle(isZh: strings.isZh),
       segments: segments,
       engineName: engineName,
       sourceType: sourceType,
@@ -299,10 +301,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       });
       return null;
     }
-    return MeetingPickerSheet.show(
-      context: context,
-      recordings: _recordings,
-    );
+    return MeetingPickerSheet.show(context: context, recordings: _recordings);
   }
 
   Future<void> _openSummaryDetail(MeetingSummaryRecord record) async {
@@ -432,12 +431,16 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       return;
     }
 
-    if (initial.isSenseVoiceReady) {
+    if (_hasReadyLiveAsr(initial, initialBridgeReport)) {
       setState(() {
         _modelCheck = initial;
         _nativeBridgeReport = initialBridgeReport;
         _status = _StatusMessage(
-          (strings) => strings.primaryAsrReady,
+          (strings) => _primaryAsrReadyStatus(
+            strings,
+            check: initial,
+            bridgeReport: initialBridgeReport,
+          ),
           tone: _StatusTone.success,
         );
       });
@@ -477,10 +480,14 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         _nativeBridgeReport = bridgeReport;
         _isInstallingModels = false;
         _status = _StatusMessage(
-          result.isSenseVoiceReady
-              ? (strings) => strings.bundledModelsInstalled
+          _hasReadyLiveAsr(result, bridgeReport)
+              ? (strings) => _primaryAsrReadyStatus(
+                  strings,
+                  check: result,
+                  bridgeReport: bridgeReport,
+                )
               : (strings) => strings.primaryAsrMissing,
-          tone: result.isSenseVoiceReady
+          tone: _hasReadyLiveAsr(result, bridgeReport)
               ? _StatusTone.success
               : _StatusTone.info,
         );
@@ -540,10 +547,10 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
     final nextIndex = segments.isEmpty
         ? 1
-        : segments.map((segment) => segment.index).reduce(
-            (left, right) => left > right ? left : right,
-          ) +
-            1;
+        : segments
+                  .map((segment) => segment.index)
+                  .reduce((left, right) => left > right ? left : right) +
+              1;
     segments.add(
       AsrSegment(
         index: nextIndex,
@@ -559,9 +566,39 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
   Future<NativeBridgeReport> _inspectNativeBridges(ModelCheckResult check) {
     return LocalNativeBridge.instance.inspectBridges(
+      moonshineModelPath: check.moonshineTinyStreamingFiles.directory,
       whisperModelPath: check.whisperModelPath,
       llamaModelPath: check.llamaModelPath,
     );
+  }
+
+  bool _hasReadyLiveAsr(
+    ModelCheckResult check,
+    NativeBridgeReport bridgeReport,
+  ) {
+    return _isMoonshineReady(check, bridgeReport) || check.isSenseVoiceReady;
+  }
+
+  bool _isMoonshineReady(
+    ModelCheckResult check,
+    NativeBridgeReport bridgeReport,
+  ) {
+    return check.isMoonshineTinyStreamingReady &&
+        bridgeReport.moonshine.isAvailable;
+  }
+
+  String _primaryAsrReadyStatus(
+    AppStrings strings, {
+    required ModelCheckResult check,
+    required NativeBridgeReport bridgeReport,
+  }) {
+    if (_isMoonshineReady(check, bridgeReport)) {
+      return strings.primaryAsrReadyMoonshine;
+    }
+    if (check.isSenseVoiceReady) {
+      return strings.primaryAsrReady;
+    }
+    return strings.primaryAsrMissing;
   }
 
   Future<List<AsrSegment>> _transcribeImportedAudio({
@@ -1249,6 +1286,18 @@ class _StatusPanel extends StatelessWidget {
             if (check != null) ...[
               const SizedBox(height: 16),
               _ModelStatusRow(
+                label: strings.moonshineTinyStreaming,
+                value: _bridgeValue(
+                  strings,
+                  modelReady: check.isMoonshineTinyStreamingReady,
+                  bridge: nativeBridgeReport?.moonshine,
+                  missingValue: strings.missingFiles(
+                    check.missingMoonshineTinyStreamingFiles.length,
+                  ),
+                ),
+                ok: nativeBridgeReport?.moonshine.isAvailable ?? false,
+              ),
+              _ModelStatusRow(
                 label: strings.sherpaSenseVoice,
                 value: check.isSenseVoiceReady
                     ? strings.ready
@@ -1300,6 +1349,8 @@ class _StatusPanel extends StatelessWidget {
                   ),
                   children: [
                     _PathLine(strings.asrRoot, check.asrRootPath),
+                    for (final file in check.missingMoonshineTinyStreamingFiles)
+                      _PathLine(strings.missing, file),
                     for (final file in check.missingSenseVoiceFiles)
                       _PathLine(strings.missing, file),
                     _PathLine(strings.whisper, check.whisperModelPath),
@@ -1908,10 +1959,7 @@ class _SummaryWorkspace extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 14),
-        _SummaryListPanel(
-          summaries: summaries,
-          onSummaryTap: onSummaryTap,
-        ),
+        _SummaryListPanel(summaries: summaries, onSummaryTap: onSummaryTap),
       ],
     );
   }
@@ -2175,10 +2223,7 @@ class _RecordingListPanel extends StatelessWidget {
 }
 
 class _RecordingListTile extends StatelessWidget {
-  const _RecordingListTile({
-    required this.recording,
-    required this.onTap,
-  });
+  const _RecordingListTile({required this.recording, required this.onTap});
 
   final RecordingSession recording;
   final VoidCallback onTap;
@@ -2242,9 +2287,9 @@ class _RecordingListTile extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        AppStrings.of(context).transcriptCount(
-                          recording.segments.length,
-                        ),
+                        AppStrings.of(
+                          context,
+                        ).transcriptCount(recording.segments.length),
                         style: textTheme.labelSmall,
                       ),
                     ],
@@ -2425,10 +2470,7 @@ class _SummaryListPanel extends StatelessWidget {
 }
 
 class _SummaryListTile extends StatelessWidget {
-  const _SummaryListTile({
-    required this.record,
-    required this.onTap,
-  });
+  const _SummaryListTile({required this.record, required this.onTap});
 
   final MeetingSummaryRecord record;
   final VoidCallback onTap;

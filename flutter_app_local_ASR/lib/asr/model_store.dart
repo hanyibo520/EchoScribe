@@ -6,6 +6,7 @@ import '../native/local_native_bridge.dart';
 
 enum ModelInstallScope {
   primaryAsr,
+  moonshineAsr,
   fastAsr,
   detailedSummary,
   offlineTranscription,
@@ -21,6 +22,16 @@ class ModelStore {
   static const String senseVoiceModelFile = 'model.int8.onnx';
   static const String senseVoiceTokensFile = 'tokens.txt';
   static const String sileroVadFile = 'silero_vad.onnx';
+  static const List<String> moonshineTinyStreamingFiles = <String>[
+    'adapter.ort',
+    'cross_kv.ort',
+    'decoder_kv.ort',
+    'decoder_kv_with_attention.ort',
+    'encoder.ort',
+    'frontend.ort',
+    'streaming_config.json',
+    'tokenizer.bin',
+  ];
   static const String whisperModelFile = 'ggml-base.bin';
   static const String qwenGgufModelFile = 'qwen3-0.6b-q4.gguf';
   static const String bundledModelAssetRoot = 'assets/models';
@@ -28,6 +39,9 @@ class ModelStore {
   static const int _fastSenseVoiceModelMinBytes = 1024 * 1024;
   static const int _senseVoiceTokensMinBytes = 1024;
   static const int _sileroVadMinBytes = 512 * 1024;
+  static const int _moonshineModelMinBytes = 1024;
+  static const int _moonshineTokenizerMinBytes = 1024;
+  static const int _moonshineConfigMinBytes = 64;
   static const int _whisperModelMinBytes = 120 * 1024 * 1024;
   static const int _qwenGgufModelMinBytes = 350 * 1024 * 1024;
 
@@ -66,6 +80,25 @@ class ModelStore {
       ),
       vad: senseVoiceVad,
     );
+    final moonshineFiles = MoonshineModelFiles(
+      directory: paths.moonshineTinyStreamingRoot,
+      files: <String, String>{
+        for (final fileName in moonshineTinyStreamingFiles)
+          fileName: await _runtimeModelPath(
+            assetDirectory:
+                '$bundledModelAssetRoot/asr/moonshine_tiny_streaming_en',
+            fileName: fileName,
+            installedPath: p.join(paths.moonshineTinyStreamingRoot, fileName),
+          ),
+      },
+    );
+    final missingMoonshineTinyStreamingFiles = <String>[];
+    for (final fileName in moonshineTinyStreamingFiles) {
+      final path = moonshineFiles.files[fileName]!;
+      if (!_isUsableFile(path, minBytes: _moonshineMinBytesFor(fileName))) {
+        missingMoonshineTinyStreamingFiles.add(path);
+      }
+    }
     final requiredAsrFiles = <_RequiredRuntimeModel>[
       _RequiredRuntimeModel(
         path: senseVoiceFiles.model,
@@ -123,6 +156,8 @@ class ModelStore {
       missingSenseVoiceFiles: missingSenseVoiceFiles,
       fastSenseVoiceFiles: fastSenseVoiceFiles,
       missingFastSenseVoiceFiles: missingFastSenseVoiceFiles,
+      moonshineTinyStreamingFiles: moonshineFiles,
+      missingMoonshineTinyStreamingFiles: missingMoonshineTinyStreamingFiles,
       whisperModelPath: whisperModel,
       isWhisperModelReady: _isUsableFile(
         whisperModel,
@@ -196,6 +231,21 @@ class ModelStore {
     required ModelInstallScope scope,
   }) {
     final primaryAsrGroups = <_ModelInstallGroup>[
+      _ModelInstallGroup(
+        label: 'Moonshine Tiny Streaming EN',
+        assetDirectory:
+            '$bundledModelAssetRoot/asr/moonshine_tiny_streaming_en',
+        destinationDirectory: paths.moonshineTinyStreamingRoot,
+        fileNames: moonshineTinyStreamingFiles,
+        runtimeModels: <_RequiredRuntimeModel>[
+          for (final fileName in moonshineTinyStreamingFiles)
+            _RequiredRuntimeModel(
+              path: check.moonshineTinyStreamingFiles.files[fileName]!,
+              minBytes: _moonshineMinBytesFor(fileName),
+            ),
+        ],
+        isRequired: false,
+      ),
       _ModelInstallGroup(
         label: 'SenseVoice',
         assetDirectory: '$bundledModelAssetRoot/asr/sensevoice',
@@ -274,6 +324,10 @@ class ModelStore {
     ];
     return switch (scope) {
       ModelInstallScope.primaryAsr => primaryAsrGroups,
+      ModelInstallScope.moonshineAsr =>
+        primaryAsrGroups
+            .where((group) => group.label == 'Moonshine Tiny Streaming EN')
+            .toList(growable: false),
       ModelInstallScope.fastAsr => fastAsrGroups,
       ModelInstallScope.detailedSummary => detailedSummaryGroups,
       ModelInstallScope.offlineTranscription => offlineTranscriptionGroups,
@@ -304,6 +358,16 @@ class ModelStore {
     }
   }
 
+  int _moonshineMinBytesFor(String fileName) {
+    if (fileName == 'streaming_config.json') {
+      return _moonshineConfigMinBytes;
+    }
+    if (fileName == 'tokenizer.bin') {
+      return _moonshineTokenizerMinBytes;
+    }
+    return _moonshineModelMinBytes;
+  }
+
   Future<int> purgeBundledModelCopies() async {
     final paths = await _paths();
     final entries = <_BundledModelCopy>[
@@ -327,6 +391,13 @@ class ModelStore {
         fileName: senseVoiceTokensFile,
         installedPath: p.join(paths.fastSenseVoiceRoot, senseVoiceTokensFile),
       ),
+      for (final fileName in moonshineTinyStreamingFiles)
+        _BundledModelCopy(
+          assetDirectory:
+              '$bundledModelAssetRoot/asr/moonshine_tiny_streaming_en',
+          fileName: fileName,
+          installedPath: p.join(paths.moonshineTinyStreamingRoot, fileName),
+        ),
       _BundledModelCopy(
         assetDirectory: '$bundledModelAssetRoot/asr',
         fileName: sileroVadFile,
@@ -369,6 +440,7 @@ class ModelStore {
 
     await _deleteEmptyDirectory(paths.senseVoiceRoot);
     await _deleteEmptyDirectory(paths.fastSenseVoiceRoot);
+    await _deleteEmptyDirectory(paths.moonshineTinyStreamingRoot);
     await _deleteEmptyDirectory(paths.whisperRoot);
     removedBytes += await _deleteDirectoryIfExists(
       p.join(paths.llmRoot, 'qwen3-0.6b-mlx'),
@@ -441,12 +513,17 @@ class ModelStore {
     final asrRoot = p.join(supportPath, 'asr_models');
     final senseVoiceRoot = p.join(asrRoot, 'sensevoice');
     final fastSenseVoiceRoot = p.join(asrRoot, 'sensevoice_fast');
+    final moonshineTinyStreamingRoot = p.join(
+      asrRoot,
+      'moonshine_tiny_streaming_en',
+    );
     final whisperRoot = p.join(asrRoot, 'whisper');
     final llmRoot = p.join(supportPath, 'llm_models');
     return _ModelPaths(
       asrRoot: asrRoot,
       senseVoiceRoot: senseVoiceRoot,
       fastSenseVoiceRoot: fastSenseVoiceRoot,
+      moonshineTinyStreamingRoot: moonshineTinyStreamingRoot,
       whisperRoot: whisperRoot,
       llmRoot: llmRoot,
     );
@@ -458,6 +535,7 @@ class _ModelPaths {
     required this.asrRoot,
     required this.senseVoiceRoot,
     required this.fastSenseVoiceRoot,
+    required this.moonshineTinyStreamingRoot,
     required this.whisperRoot,
     required this.llmRoot,
   });
@@ -465,12 +543,14 @@ class _ModelPaths {
   final String asrRoot;
   final String senseVoiceRoot;
   final String fastSenseVoiceRoot;
+  final String moonshineTinyStreamingRoot;
   final String whisperRoot;
   final String llmRoot;
 
   Future<void> createDirectories() async {
     await Directory(senseVoiceRoot).create(recursive: true);
     await Directory(fastSenseVoiceRoot).create(recursive: true);
+    await Directory(moonshineTinyStreamingRoot).create(recursive: true);
     await Directory(whisperRoot).create(recursive: true);
     await Directory(llmRoot).create(recursive: true);
   }
@@ -563,6 +643,13 @@ class SenseVoiceModelProfile {
   final SenseVoiceModelFiles files;
 }
 
+class MoonshineModelFiles {
+  const MoonshineModelFiles({required this.directory, required this.files});
+
+  final String directory;
+  final Map<String, String> files;
+}
+
 class ModelCheckResult {
   const ModelCheckResult({
     required this.asrRootPath,
@@ -570,6 +657,8 @@ class ModelCheckResult {
     required this.missingSenseVoiceFiles,
     required this.fastSenseVoiceFiles,
     required this.missingFastSenseVoiceFiles,
+    required this.moonshineTinyStreamingFiles,
+    required this.missingMoonshineTinyStreamingFiles,
     required this.whisperModelPath,
     required this.isWhisperModelReady,
     required this.llamaModelPath,
@@ -581,6 +670,8 @@ class ModelCheckResult {
   final List<String> missingSenseVoiceFiles;
   final SenseVoiceModelFiles fastSenseVoiceFiles;
   final List<String> missingFastSenseVoiceFiles;
+  final MoonshineModelFiles moonshineTinyStreamingFiles;
+  final List<String> missingMoonshineTinyStreamingFiles;
   final String whisperModelPath;
   final bool isWhisperModelReady;
   final String llamaModelPath;
@@ -588,6 +679,9 @@ class ModelCheckResult {
 
   bool get isSenseVoiceReady => missingSenseVoiceFiles.isEmpty;
   bool get isFastSenseVoiceReady => missingFastSenseVoiceFiles.isEmpty;
+  bool get isMoonshineTinyStreamingReady =>
+      missingMoonshineTinyStreamingFiles.isEmpty;
+  bool get isLiveAsrReady => isMoonshineTinyStreamingReady || isSenseVoiceReady;
   bool get hasFileTranscriptionSenseVoiceReady =>
       isFastSenseVoiceReady || isSenseVoiceReady;
   List<SenseVoiceModelProfile> get fileTranscriptionSenseVoiceProfiles => [
@@ -595,5 +689,8 @@ class ModelCheckResult {
     if (isSenseVoiceReady) SenseVoiceModelProfile.standard(senseVoiceFiles),
   ];
   bool get hasInstallableMissingModels =>
-      !isSenseVoiceReady || !isWhisperModelReady || !isLlamaModelReady;
+      !isMoonshineTinyStreamingReady ||
+      !isSenseVoiceReady ||
+      !isWhisperModelReady ||
+      !isLlamaModelReady;
 }

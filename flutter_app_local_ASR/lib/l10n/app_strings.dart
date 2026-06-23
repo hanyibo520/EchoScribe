@@ -28,6 +28,9 @@ class AppStrings {
   String get primaryAsrReady => isZh
       ? '主 ASR 已就绪：Sherpa-ONNX SenseVoice'
       : 'Primary ASR ready: Sherpa-ONNX SenseVoice';
+  String get primaryAsrReadyMoonshine => isZh
+      ? '主 ASR 已就绪：Moonshine Tiny Streaming'
+      : 'Primary ASR ready: Moonshine Tiny Streaming';
   String get primaryAsrMissing => isZh
       ? '主 ASR 模型缺失，将继续使用后备链路'
       : 'Primary ASR model is missing; fallback chain will continue';
@@ -68,6 +71,7 @@ class AppStrings {
   }
 
   String get sherpaSenseVoice => 'Sherpa SenseVoice';
+  String get moonshineTinyStreaming => 'Moonshine Tiny Streaming';
   String get whisperCpp => 'whisper.cpp';
   String get systemAsr => isZh ? '系统 ASR' : 'System ASR';
   String get llamaCppQwen => 'llama.cpp Qwen';
@@ -132,8 +136,7 @@ class AppStrings {
   String get noRecordingsYet =>
       isZh ? '暂无录音记录，点击上方开始录音' : 'No recordings yet. Tap above to start.';
   String meetingTitle(int index) => isZh ? '会议$index' : 'Meeting $index';
-  String recordingSaved(String title) =>
-      isZh ? '$title 已保存' : '$title saved';
+  String recordingSaved(String title) => isZh ? '$title 已保存' : '$title saved';
   String get recordingNotSavedEmpty => isZh
       ? '未识别到语音内容，本次录音未保存'
       : 'No speech was recognized, recording not saved';
@@ -148,17 +151,16 @@ class AppStrings {
   }
 
   String get useForSummary => isZh ? '用于生成总结' : 'Use for summary';
-  String get selectedForSummary =>
-      isZh ? '已选为当前总结来源' : 'Selected for summary';
+  String get selectedForSummary => isZh ? '已选为当前总结来源' : 'Selected for summary';
   String get pickMeetingForSummary =>
       isZh ? '选择要总结的会议' : 'Choose a meeting to summarize';
   String get summaryHistory => isZh ? '总结记录' : 'Summaries';
   String summaryCount(int count) => isZh ? '$count 条总结' : '$count summaries';
-  String summarySaved(String title) =>
-      isZh ? '$title 已生成' : '$title generated';
+  String summarySaved(String title) => isZh ? '$title 已生成' : '$title generated';
   String summaryBasedOn(String recordingTitle) =>
       isZh ? '基于 $recordingTitle' : 'Based on $recordingTitle';
-  String get importSavedHint => isZh ? '导入后会保存为录音记录' : 'Imports are saved as recordings';
+  String get importSavedHint =>
+      isZh ? '导入后会保存为录音记录' : 'Imports are saved as recordings';
   String get importGoToSummaryHint => isZh
       ? '音频已导入为录音记录，请前往「总结」页选择会议生成总结'
       : 'Audio saved as a recording. Go to Summary to generate.';

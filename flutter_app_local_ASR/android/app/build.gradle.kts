@@ -54,6 +54,12 @@ android {
             version = "3.22.1"
         }
     }
+
+    packaging {
+        jniLibs {
+            pickFirsts += "lib/arm64-v8a/libonnxruntime.so"
+        }
+    }
 }
 
 flutter {
@@ -62,4 +68,7 @@ flutter {
 
 dependencies {
     implementation(files("libs/llama-cpp-dart.aar"))
+    implementation("ai.moonshine:moonshine-voice:0.0.62")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.core:core-ktx:1.13.1")
 }

@@ -1,15 +1,61 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
 
 class LocalNativeBridge {
-  LocalNativeBridge._();
+  LocalNativeBridge._() {
+    _channel.setMethodCallHandler(_handleNativeCall);
+  }
 
   static final LocalNativeBridge instance = LocalNativeBridge._();
 
   static const MethodChannel _channel = MethodChannel(
     'local_meeting_asr/native_bridge',
   );
+
+  final StreamController<MoonshineAsrNativeEvent> _moonshineEvents =
+      StreamController<MoonshineAsrNativeEvent>.broadcast();
+
+  Stream<MoonshineAsrNativeEvent> get moonshineEvents =>
+      _moonshineEvents.stream;
+
+  Future<dynamic> _handleNativeCall(MethodCall call) async {
+    switch (call.method) {
+      case 'moonshineStatus':
+        _moonshineEvents.add(
+          MoonshineAsrNativeEvent.status(_stringArgument(call.arguments)),
+        );
+        return null;
+      case 'moonshinePartial':
+        _moonshineEvents.add(
+          MoonshineAsrNativeEvent.partial(_stringArgument(call.arguments)),
+        );
+        return null;
+      case 'moonshineSegment':
+        _moonshineEvents.add(
+          MoonshineAsrNativeEvent.segment(_stringArgument(call.arguments)),
+        );
+        return null;
+      case 'moonshineError':
+        _moonshineEvents.add(
+          MoonshineAsrNativeEvent.error(_stringArgument(call.arguments)),
+        );
+        return null;
+      default:
+        throw MissingPluginException('Unknown native callback ${call.method}');
+    }
+  }
+
+  String _stringArgument(Object? value) {
+    if (value is Map) {
+      return value['text']?.toString() ??
+          value['message']?.toString() ??
+          value['reason']?.toString() ??
+          '';
+    }
+    return value?.toString() ?? '';
+  }
 
   Future<String> applicationSupportDirectory() async {
     try {
@@ -53,15 +99,15 @@ class LocalNativeBridge {
   Future<NativeBridgeReport> inspectBridges({
     required String whisperModelPath,
     required String llamaModelPath,
+    String moonshineModelPath = '',
   }) async {
     try {
-      final response = await _channel.invokeMapMethod<String, Object?>(
-        'inspectBridges',
-        <String, Object?>{
-          'whisperModelPath': whisperModelPath,
-          'llamaModelPath': llamaModelPath,
-        },
-      );
+      final response = await _channel
+          .invokeMapMethod<String, Object?>('inspectBridges', <String, Object?>{
+            'whisperModelPath': whisperModelPath,
+            'llamaModelPath': llamaModelPath,
+            'moonshineModelPath': moonshineModelPath,
+          });
       return NativeBridgeReport.fromMap(response);
     } on MissingPluginException {
       return NativeBridgeReport.unavailable(
@@ -80,6 +126,44 @@ class LocalNativeBridge {
       llamaModelPath: '',
     );
     return report.whisperCpp;
+  }
+
+  Future<NativeBridgeStatus> checkMoonshine({required String modelPath}) async {
+    try {
+      final response = await _channel.invokeMapMethod<String, Object?>(
+        'checkMoonshine',
+        <String, Object?>{'modelPath': modelPath},
+      );
+      return NativeBridgeStatus.fromMap(response);
+    } on MissingPluginException {
+      return NativeBridgeStatus.unavailable(
+        'Moonshine native bridge is not registered on this platform',
+      );
+    } on PlatformException catch (error) {
+      return NativeBridgeStatus.unavailable(error.message ?? error.code);
+    }
+  }
+
+  Future<void> startMoonshine({required String modelPath}) async {
+    await _channel.invokeMethod<void>('startMoonshine', <String, Object?>{
+      'modelPath': modelPath,
+    });
+  }
+
+  Future<void> stopMoonshine() async {
+    try {
+      await _channel.invokeMethod<void>('stopMoonshine');
+    } on MissingPluginException {
+      // Unsupported platforms can fall back to the next ASR engine.
+    }
+  }
+
+  Future<void> disposeMoonshine() async {
+    try {
+      await _channel.invokeMethod<void>('disposeMoonshine');
+    } on MissingPluginException {
+      // Unsupported platforms can fall back to the next ASR engine.
+    }
   }
 
   Future<String> transcribeWithWhisperCpp({
@@ -234,23 +318,54 @@ class DecodedPcmAudio {
   final int sampleRate;
 }
 
+enum MoonshineAsrNativeEventType { status, partial, segment, error }
+
+class MoonshineAsrNativeEvent {
+  const MoonshineAsrNativeEvent._({required this.type, required this.text});
+
+  const MoonshineAsrNativeEvent.status(String text)
+    : this._(type: MoonshineAsrNativeEventType.status, text: text);
+
+  const MoonshineAsrNativeEvent.partial(String text)
+    : this._(type: MoonshineAsrNativeEventType.partial, text: text);
+
+  const MoonshineAsrNativeEvent.segment(String text)
+    : this._(type: MoonshineAsrNativeEventType.segment, text: text);
+
+  const MoonshineAsrNativeEvent.error(String text)
+    : this._(type: MoonshineAsrNativeEventType.error, text: text);
+
+  final MoonshineAsrNativeEventType type;
+  final String text;
+}
+
 class NativeBridgeReport {
-  const NativeBridgeReport({required this.whisperCpp, required this.llamaCpp});
+  const NativeBridgeReport({
+    required this.whisperCpp,
+    required this.llamaCpp,
+    required this.moonshine,
+  });
 
   factory NativeBridgeReport.fromMap(Map<String, Object?>? value) {
     return NativeBridgeReport(
       whisperCpp: NativeBridgeStatus.fromMap(value?['whisperCpp']),
       llamaCpp: NativeBridgeStatus.fromMap(value?['llamaCpp']),
+      moonshine: NativeBridgeStatus.fromMap(value?['moonshine']),
     );
   }
 
   factory NativeBridgeReport.unavailable(String reason) {
     final status = NativeBridgeStatus.unavailable(reason);
-    return NativeBridgeReport(whisperCpp: status, llamaCpp: status);
+    return NativeBridgeReport(
+      whisperCpp: status,
+      llamaCpp: status,
+      moonshine: status,
+    );
   }
 
   final NativeBridgeStatus whisperCpp;
   final NativeBridgeStatus llamaCpp;
+  final NativeBridgeStatus moonshine;
 }
 
 class NativeBridgeStatus {

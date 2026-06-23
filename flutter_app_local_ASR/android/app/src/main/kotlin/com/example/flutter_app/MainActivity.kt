@@ -1,12 +1,20 @@
 package com.example.flutter_app
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.content.Intent
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
+import androidx.core.content.ContextCompat
+import ai.moonshine.voice.JNI
+import ai.moonshine.voice.MicTranscriber
+import ai.moonshine.voice.TranscriptEvent
+import ai.moonshine.voice.TranscriptEventListener
 import io.flutter.FlutterInjector
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -22,12 +30,16 @@ class MainActivity : FlutterActivity() {
     private val channelName = "local_meeting_asr/native_bridge"
     private val audioPickerRequestCode = 9401
     private var pendingAudioPickerResult: MethodChannel.Result? = null
+    private var nativeBridgeChannel: MethodChannel? = null
+    private var moonshineTranscriber: MicTranscriber? = null
+    private var isMoonshineListening = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-            .setMethodCallHandler { call, result ->
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        nativeBridgeChannel = channel
+        channel.setMethodCallHandler { call, result ->
                 try {
                     when (call.method) {
                         "applicationSupportDirectory" -> {
@@ -43,6 +55,24 @@ class MainActivity : FlutterActivity() {
                         }
                         "inspectBridges" -> {
                             result.success(inspectBridges(call))
+                        }
+                        "checkMoonshine" -> {
+                            result.success(checkMoonshine(call.requiredString("modelPath")))
+                        }
+                        "startMoonshine" -> {
+                            runOnWorker(result) {
+                                startMoonshine(call.requiredString("modelPath"))
+                            }
+                        }
+                        "stopMoonshine" -> {
+                            runOnWorker(result) {
+                                stopMoonshine()
+                            }
+                        }
+                        "disposeMoonshine" -> {
+                            runOnWorker(result) {
+                                disposeMoonshine()
+                            }
                         }
                         "pickAudioFile" -> {
                             pickAudioFile(result)
@@ -276,11 +306,122 @@ class MainActivity : FlutterActivity() {
                     "detail" to "llama.cpp Android runtime is linked"
                 )
             }
+        val moonshineModelPath = call.argument<String>("moonshineModelPath").orEmpty()
 
         return mapOf(
             "whisperCpp" to whisperStatus,
-            "llamaCpp" to llamaStatus
+            "llamaCpp" to llamaStatus,
+            "moonshine" to checkMoonshine(moonshineModelPath)
         )
+    }
+
+    private fun checkMoonshine(modelPath: String): Map<String, Any?> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            return mapOf(
+                "available" to false,
+                "reason" to "Moonshine Android runtime requires Android 15 / API 35"
+            )
+        }
+        if (modelPath.isEmpty()) {
+            return mapOf(
+                "available" to false,
+                "reason" to "Moonshine model path is empty"
+            )
+        }
+
+        val missingFile = moonshineRequiredFiles.firstOrNull { fileName ->
+            val file = File(modelPath, fileName)
+            !file.exists() || file.length() < moonshineMinBytes(fileName)
+        }
+        if (missingFile != null) {
+            return mapOf(
+                "available" to false,
+                "reason" to "Moonshine model is missing $missingFile in $modelPath"
+            )
+        }
+
+        return try {
+            JNI.ensureLibraryLoaded()
+            mapOf(
+                "available" to true,
+                "detail" to "Moonshine Android runtime is linked"
+            )
+        } catch (error: Throwable) {
+            mapOf(
+                "available" to false,
+                "reason" to "Moonshine runtime failed to load: ${error.message}"
+            )
+        }
+    }
+
+    private fun startMoonshine(modelPath: String): Map<String, Any?> {
+        val status = checkMoonshine(modelPath)
+        if (status["available"] != true) {
+            throw IllegalStateException(status["reason"]?.toString() ?: "Moonshine is unavailable")
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            throw IllegalStateException("Microphone permission denied")
+        }
+
+        val transcriber = ensureMoonshineTranscriber(modelPath)
+        transcriber.onMicPermissionGranted()
+        transcriber.start()
+        isMoonshineListening = true
+        sendMoonshineEvent("moonshineStatus", "Listening with Moonshine Tiny Streaming")
+        return mapOf("started" to true)
+    }
+
+    private fun stopMoonshine(): Map<String, Any?> {
+        val transcriber = moonshineTranscriber ?: return mapOf("stopped" to true)
+        if (isMoonshineListening) {
+            transcriber.stop()
+        }
+        isMoonshineListening = false
+        sendMoonshineEvent("moonshineStatus", "Stopped")
+        return mapOf("stopped" to true)
+    }
+
+    private fun disposeMoonshine(): Map<String, Any?> {
+        runCatching { stopMoonshine() }
+        moonshineTranscriber?.removeAllListeners()
+        moonshineTranscriber = null
+        return mapOf("disposed" to true)
+    }
+
+    private fun ensureMoonshineTranscriber(modelPath: String): MicTranscriber {
+        moonshineTranscriber?.let { return it }
+
+        val transcriber = MicTranscriber()
+        transcriber.addListener { event: TranscriptEvent ->
+            event.accept(object : TranscriptEventListener() {
+                override fun onLineTextChanged(e: TranscriptEvent.LineTextChanged) {
+                    sendMoonshineEvent("moonshinePartial", e.line.text ?: "")
+                }
+
+                override fun onLineCompleted(e: TranscriptEvent.LineCompleted) {
+                    sendMoonshineEvent("moonshineSegment", e.line.text ?: "")
+                }
+            })
+        }
+        transcriber.loadFromFiles(modelPath, JNI.MOONSHINE_MODEL_ARCH_TINY_STREAMING)
+        moonshineTranscriber = transcriber
+        sendMoonshineEvent("moonshineStatus", "Moonshine initialized")
+        return transcriber
+    }
+
+    private fun sendMoonshineEvent(method: String, text: String) {
+        runOnUiThread {
+            nativeBridgeChannel?.invokeMethod(method, mapOf("text" to text))
+        }
+    }
+
+    private fun moonshineMinBytes(fileName: String): Long {
+        return when (fileName) {
+            "streaming_config.json" -> 64L
+            else -> 1024L
+        }
     }
 
     private fun transcribeWithWhisperCpp(call: MethodCall): Map<String, Any?> {
@@ -584,6 +725,16 @@ class MainActivity : FlutterActivity() {
     }
 
     companion object {
+        private val moonshineRequiredFiles = listOf(
+            "adapter.ort",
+            "cross_kv.ort",
+            "decoder_kv.ort",
+            "decoder_kv_with_attention.ort",
+            "encoder.ort",
+            "frontend.ort",
+            "streaming_config.json",
+            "tokenizer.bin"
+        )
         private val nativeLibraryLoadError: String? = runCatching {
             System.loadLibrary("local_meeting_asr")
         }.exceptionOrNull()?.message

@@ -30,6 +30,47 @@ const requiredModelFiles = <_RequiredModelFile>[
 
 const optionalModelFiles = <_RequiredModelFile>[
   _RequiredModelFile(
+    label: 'Moonshine Tiny Streaming adapter',
+    path: 'assets/models/asr/moonshine_tiny_streaming_en/adapter.ort',
+    minBytes: 1024,
+  ),
+  _RequiredModelFile(
+    label: 'Moonshine Tiny Streaming cross KV',
+    path: 'assets/models/asr/moonshine_tiny_streaming_en/cross_kv.ort',
+    minBytes: 1024,
+  ),
+  _RequiredModelFile(
+    label: 'Moonshine Tiny Streaming decoder KV',
+    path: 'assets/models/asr/moonshine_tiny_streaming_en/decoder_kv.ort',
+    minBytes: 1024,
+  ),
+  _RequiredModelFile(
+    label: 'Moonshine Tiny Streaming decoder KV with attention',
+    path:
+        'assets/models/asr/moonshine_tiny_streaming_en/decoder_kv_with_attention.ort',
+    minBytes: 1024,
+  ),
+  _RequiredModelFile(
+    label: 'Moonshine Tiny Streaming encoder',
+    path: 'assets/models/asr/moonshine_tiny_streaming_en/encoder.ort',
+    minBytes: 1024,
+  ),
+  _RequiredModelFile(
+    label: 'Moonshine Tiny Streaming frontend',
+    path: 'assets/models/asr/moonshine_tiny_streaming_en/frontend.ort',
+    minBytes: 1024,
+  ),
+  _RequiredModelFile(
+    label: 'Moonshine Tiny Streaming config',
+    path: 'assets/models/asr/moonshine_tiny_streaming_en/streaming_config.json',
+    minBytes: 64,
+  ),
+  _RequiredModelFile(
+    label: 'Moonshine Tiny Streaming tokenizer',
+    path: 'assets/models/asr/moonshine_tiny_streaming_en/tokenizer.bin',
+    minBytes: 1024,
+  ),
+  _RequiredModelFile(
     label: 'SenseVoice fast ONNX model',
     path: 'assets/models/asr/sensevoice_fast/model.int8.onnx',
     minBytes: 1024 * 1024,
@@ -62,6 +103,12 @@ void main() {
   for (final warning in warnings) {
     stdout.writeln('WARN $warning');
   }
+  if (_hasMoonshineWarnings(warnings)) {
+    stdout.writeln(
+      'Run `dart run tool/download_moonshine_tiny_streaming.dart` '
+      'to download the optional Moonshine Tiny Streaming model files.',
+    );
+  }
 
   if (problems.isEmpty) {
     stdout.writeln('Offline model bundle is ready.');
@@ -73,6 +120,12 @@ void main() {
     stderr.writeln('- $problem');
   }
   exitCode = 1;
+}
+
+bool _hasMoonshineWarnings(List<String> warnings) {
+  return warnings.any(
+    (warning) => warning.contains('Moonshine Tiny Streaming'),
+  );
 }
 
 String? _verifyModelFile(_RequiredModelFile model) {

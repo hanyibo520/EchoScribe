@@ -86,6 +86,23 @@ void main() {
     expect(check.fastSenseVoiceFiles.model, 'fast-model');
   });
 
+  test('live ASR can use Moonshine or SenseVoice as primary fallback', () {
+    expect(_modelCheck().isLiveAsrReady, isTrue);
+    expect(
+      _modelCheck(
+        missingMoonshineTinyStreamingFiles: const <String>['moonshine-model'],
+      ).isLiveAsrReady,
+      isTrue,
+    );
+    expect(
+      _modelCheck(
+        missingSenseVoiceFiles: const <String>['standard-model'],
+        missingMoonshineTinyStreamingFiles: const <String>['moonshine-model'],
+      ).isLiveAsrReady,
+      isFalse,
+    );
+  });
+
   test('file ASR fast profile falls back on empty or low quality result', () {
     expect(
       fileAsrProfileFallbackReason(
@@ -489,6 +506,7 @@ Uint8List _pcm16Bytes(List<int> values) {
 ModelCheckResult _modelCheck({
   List<String> missingSenseVoiceFiles = const <String>[],
   List<String> missingFastSenseVoiceFiles = const <String>[],
+  List<String> missingMoonshineTinyStreamingFiles = const <String>[],
 }) {
   return ModelCheckResult(
     asrRootPath: 'asr-root',
@@ -504,6 +522,20 @@ ModelCheckResult _modelCheck({
       vad: 'vad',
     ),
     missingFastSenseVoiceFiles: missingFastSenseVoiceFiles,
+    moonshineTinyStreamingFiles: const MoonshineModelFiles(
+      directory: 'moonshine-root',
+      files: <String, String>{
+        'adapter.ort': 'adapter',
+        'cross_kv.ort': 'cross-kv',
+        'decoder_kv.ort': 'decoder-kv',
+        'decoder_kv_with_attention.ort': 'decoder-kv-with-attention',
+        'encoder.ort': 'encoder',
+        'frontend.ort': 'frontend',
+        'streaming_config.json': 'streaming-config',
+        'tokenizer.bin': 'tokenizer',
+      },
+    ),
+    missingMoonshineTinyStreamingFiles: missingMoonshineTinyStreamingFiles,
     whisperModelPath: 'whisper',
     isWhisperModelReady: true,
     llamaModelPath: 'llama',

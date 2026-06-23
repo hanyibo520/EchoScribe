@@ -61,6 +61,32 @@
 
 结论：当前 standard 本地 ASR 链路稳定可用。它比云端 ASR 慢，主要原因是本地运行在 iPhone CPU 上，而云端通常使用 GPU 或服务端大规模并行推理。
 
+## Moonshine Tiny Streaming 接入状态
+
+英文实时 ASR 已新增 Moonshine Tiny Streaming 作为 live fallback 链路第一优先级：
+
+- 模型目录：`assets/models/asr/moonshine_tiny_streaming_en/`
+- 需要文件：
+  - `adapter.ort`
+  - `cross_kv.ort`
+  - `decoder_kv.ort`
+  - `decoder_kv_with_attention.ort`
+  - `encoder.ort`
+  - `frontend.ort`
+  - `streaming_config.json`
+  - `tokenizer.bin`
+- Android runtime：`ai.moonshine:moonshine-voice:0.0.62`
+- 当前 Android 限制：Moonshine AAR 声明 `minSdk=35`，项目仍保持 `minSdk=26`；低于 Android 15 / API 35 时 Moonshine 会返回不可用并回退到 SenseVoice。
+- iOS runtime：桥接状态已预留，但当前未链接 Moonshine Swift/XCFramework，iOS 会继续回退到 SenseVoice。
+
+通过以下命令获取 Moonshine 真正权重文件：
+
+```sh
+dart run tool/download_moonshine_tiny_streaming.dart
+```
+
+`dart run tool/verify_offline_bundle.dart` 会检查这些文件是否齐全；缺失时只以 warning 形式提示，不阻塞现有离线包。
+
 ## 后续 Fast 模型 Benchmark 目标
 
 当拿到兼容的 `sensevoice_fast` 模型后：
