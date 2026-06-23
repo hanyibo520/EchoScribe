@@ -86,6 +86,9 @@ class AppStrings {
   String get bridgeReady => isZh ? '桥接已接入' : 'Bridge ready';
   String get nativeRuntimeMissing =>
       isZh ? '模型已安装，原生引擎未启用' : 'Model installed, native engine disabled';
+  String get moonshineNativeRuntimeMissing => isZh
+      ? 'iOS 运行库未接入，当前回退 SenseVoice'
+      : 'iOS runtime not linked; falling back to SenseVoice';
   String get fallbackReady => isZh ? '后备可用' : 'Fallback ready';
   String get modelPaths => isZh ? '模型路径' : 'Model paths';
   String get asrRoot => isZh ? 'ASR 根目录' : 'ASR root';

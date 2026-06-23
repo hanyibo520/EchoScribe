@@ -1294,6 +1294,7 @@ class _StatusPanel extends StatelessWidget {
                   missingValue: strings.missingFiles(
                     check.missingMoonshineTinyStreamingFiles.length,
                   ),
+                  unavailableValue: strings.moonshineNativeRuntimeMissing,
                 ),
                 ok: nativeBridgeReport?.moonshine.isAvailable ?? false,
               ),
@@ -1385,6 +1386,7 @@ String _bridgeValue(
   required bool modelReady,
   required NativeBridgeStatus? bridge,
   required String missingValue,
+  String? unavailableValue,
 }) {
   if (!modelReady) {
     return missingValue;
@@ -1394,7 +1396,7 @@ String _bridgeValue(
   }
   return bridge.isAvailable
       ? strings.bridgeReady
-      : strings.nativeRuntimeMissing;
+      : unavailableValue ?? strings.nativeRuntimeMissing;
 }
 
 enum _StatusTone {

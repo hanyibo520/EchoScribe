@@ -77,7 +77,7 @@
   - `tokenizer.bin`
 - Android runtime：`ai.moonshine:moonshine-voice:0.0.62`
 - 当前 Android 限制：Moonshine AAR 声明 `minSdk=35`，项目仍保持 `minSdk=26`；低于 Android 15 / API 35 时 Moonshine 会返回不可用并回退到 SenseVoice。
-- iOS runtime：桥接状态已预留，但当前未链接 Moonshine Swift/XCFramework，iOS 会继续回退到 SenseVoice。
+- iOS runtime：Runner 已接入 SwiftPM `https://github.com/moonshine-ai/moonshine-swift.git`，product 为 `MoonshineVoice`，版本固定 `0.0.62`；`AppDelegate.swift` 已调用 `MicTranscriber(modelArch: .tinyStreaming)`。当前命令环境无法解析 GitHub 依赖时，需要在 Xcode 中完成 package resolve，或提供 `moonshine-swift` 本地源码包。
 
 通过以下命令获取 Moonshine 真正权重文件：
 

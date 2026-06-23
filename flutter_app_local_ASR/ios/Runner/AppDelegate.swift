@@ -1,6 +1,7 @@
 import Flutter
 import AVFoundation
 import Darwin
+import MoonshineVoice
 import UIKit
 import UniformTypeIdentifiers
 import whisper
@@ -13,6 +14,20 @@ private enum NativeBridgeFailure: Error {
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate, UIDocumentPickerDelegate {
   private var pendingAudioPickerResult: FlutterResult?
+  private var nativeBridgeChannel: FlutterMethodChannel?
+  private var moonshineTranscriber: MicTranscriber?
+  private var moonshineModelPath: String?
+  private var isMoonshineListening = false
+  private let moonshineRequiredFiles = [
+    "adapter.ort",
+    "cross_kv.ort",
+    "decoder_kv.ort",
+    "decoder_kv_with_attention.ort",
+    "encoder.ort",
+    "frontend.ort",
+    "streaming_config.json",
+    "tokenizer.bin"
+  ]
 
   override func application(
     _ application: UIApplication,
@@ -31,6 +46,7 @@ private enum NativeBridgeFailure: Error {
       name: "local_meeting_asr/native_bridge",
       binaryMessenger: binaryMessenger
     )
+    nativeBridgeChannel = channel
     channel.setMethodCallHandler { [weak self] call, result in
       guard let self else {
         result(
@@ -75,18 +91,37 @@ private enum NativeBridgeFailure: Error {
       case "inspectBridges":
         result(self.inspectBridges(arguments: call.arguments))
       case "checkMoonshine":
-        result(self.moonshineUnavailableStatus())
+        result(self.checkMoonshine(arguments: call.arguments))
       case "startMoonshine":
-        result(
-          FlutterError(
-            code: "MOONSHINE_UNAVAILABLE",
-            message: "Moonshine runtime is not linked into the iOS target",
-            details: nil
+        do {
+          result(try self.startMoonshine(arguments: call.arguments))
+        } catch NativeBridgeFailure.invalidArguments(let message) {
+          result(FlutterError(code: "INVALID_ARGUMENTS", message: message, details: nil))
+        } catch NativeBridgeFailure.runtime(let message) {
+          result(FlutterError(code: "MOONSHINE_FAILED", message: message, details: nil))
+        } catch {
+          result(
+            FlutterError(
+              code: "MOONSHINE_FAILED",
+              message: error.localizedDescription,
+              details: nil
+            )
           )
-        )
+        }
       case "stopMoonshine":
-        result(nil)
+        do {
+          result(try self.stopMoonshine())
+        } catch {
+          result(
+            FlutterError(
+              code: "MOONSHINE_STOP_FAILED",
+              message: error.localizedDescription,
+              details: nil
+            )
+          )
+        }
       case "disposeMoonshine":
+        self.disposeMoonshine()
         result(nil)
       case "pickAudioFile":
         self.pickAudioFile(result: result)
@@ -291,15 +326,145 @@ private enum NativeBridgeFailure: Error {
         ],
         callableWhenLinked: true
       ),
-      "moonshine": moonshineUnavailableStatus()
+      "moonshine": checkMoonshine(modelPath: values?["moonshineModelPath"] as? String)
     ]
   }
 
-  private func moonshineUnavailableStatus() -> [String: Any] {
-    [
-      "available": false,
-      "reason": "Moonshine runtime is not linked into the iOS target"
-    ]
+  private func checkMoonshine(arguments: Any?) -> [String: Any] {
+    let values = arguments as? [String: Any]
+    return checkMoonshine(modelPath: values?["modelPath"] as? String)
+  }
+
+  private func checkMoonshine(modelPath: String?) -> [String: Any] {
+    do {
+      let resolvedPath = try validateMoonshineModelPath(modelPath)
+      return [
+        "available": true,
+        "detail": "MoonshineVoice runtime is linked; model path \(resolvedPath)"
+      ]
+    } catch NativeBridgeFailure.invalidArguments(let message) {
+      return [
+        "available": false,
+        "reason": message
+      ]
+    } catch NativeBridgeFailure.runtime(let message) {
+      return [
+        "available": false,
+        "reason": message
+      ]
+    } catch {
+      return [
+        "available": false,
+        "reason": error.localizedDescription
+      ]
+    }
+  }
+
+  private func startMoonshine(arguments: Any?) throws -> [String: Any] {
+    guard let values = arguments as? [String: Any],
+          let modelPath = values["modelPath"] as? String else {
+      throw NativeBridgeFailure.invalidArguments("Missing Moonshine model path")
+    }
+
+    let resolvedPath = try validateMoonshineModelPath(modelPath)
+    let transcriber = try ensureMoonshineTranscriber(modelPath: resolvedPath)
+    if !isMoonshineListening {
+      try transcriber.start()
+      isMoonshineListening = true
+      sendMoonshineEvent("moonshineStatus", text: "Listening with Moonshine Tiny Streaming")
+    }
+    return ["started": true]
+  }
+
+  private func stopMoonshine() throws -> [String: Any] {
+    if isMoonshineListening, let transcriber = moonshineTranscriber {
+      try transcriber.stop()
+      isMoonshineListening = false
+      sendMoonshineEvent("moonshineStatus", text: "Stopped")
+    }
+    return ["stopped": true]
+  }
+
+  private func disposeMoonshine() {
+    try? stopMoonshine()
+    moonshineTranscriber = nil
+    moonshineModelPath = nil
+    isMoonshineListening = false
+  }
+
+  private func ensureMoonshineTranscriber(modelPath: String) throws -> MicTranscriber {
+    if let transcriber = moonshineTranscriber, moonshineModelPath == modelPath {
+      return transcriber
+    }
+
+    disposeMoonshine()
+    let transcriber = try MicTranscriber(
+      modelPath: modelPath,
+      modelArch: ModelArch.tinyStreaming
+    )
+    transcriber.addListener { [weak self] event in
+      guard let self else {
+        return
+      }
+      if event is LineStarted {
+        self.sendMoonshineEvent("moonshineStatus", text: "Speech started")
+      } else if event is LineTextChanged {
+        self.sendMoonshineEvent("moonshinePartial", text: event.line.text)
+      } else if event is LineCompleted {
+        let text = event.line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty {
+          self.sendMoonshineEvent("moonshineSegment", text: text)
+        }
+      }
+    }
+    moonshineTranscriber = transcriber
+    moonshineModelPath = modelPath
+    sendMoonshineEvent("moonshineStatus", text: "Moonshine initialized")
+    return transcriber
+  }
+
+  private func sendMoonshineEvent(_ method: String, text: String) {
+    DispatchQueue.main.async { [weak self] in
+      self?.nativeBridgeChannel?.invokeMethod(method, arguments: ["text": text])
+    }
+  }
+
+  private func validateMoonshineModelPath(_ modelPath: String?) throws -> String {
+    guard let modelPath, !modelPath.isEmpty else {
+      throw NativeBridgeFailure.invalidArguments("Moonshine model path is empty")
+    }
+
+    let directory = URL(fileURLWithPath: modelPath, isDirectory: true)
+    let fileManager = FileManager.default
+    var isDirectory: ObjCBool = false
+    guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+          isDirectory.boolValue else {
+      throw NativeBridgeFailure.runtime("Moonshine model directory is missing at \(directory.path)")
+    }
+
+    for fileName in moonshineRequiredFiles {
+      let file = directory.appendingPathComponent(fileName)
+      guard fileManager.fileExists(atPath: file.path) else {
+        throw NativeBridgeFailure.runtime("Moonshine model is missing \(fileName)")
+      }
+      guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
+            let size = attributes[.size] as? NSNumber,
+            size.intValue >= moonshineMinimumBytes(fileName) else {
+        throw NativeBridgeFailure.runtime("Moonshine model file is incomplete: \(fileName)")
+      }
+    }
+
+    return directory.path
+  }
+
+  private func moonshineMinimumBytes(_ fileName: String) -> Int {
+    if fileName == "streaming_config.json" {
+      return 64
+    }
+    if fileName == "tokenizer.bin" {
+      return 1024
+    }
+    return 1024
   }
 
   private func runtimeStatus(
