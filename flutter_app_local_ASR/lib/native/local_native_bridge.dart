@@ -219,6 +219,28 @@ class LocalNativeBridge {
     return response?['text']?.toString() ?? '';
   }
 
+  Future<List<MoonshineFileSegment>> transcribeAudioFileWithMoonshine({
+    required String modelPath,
+    required String audioFilePath,
+  }) async {
+    final response = await _channel.invokeMapMethod<String, Object?>(
+      'transcribeAudioFileWithMoonshine',
+      <String, Object?>{
+        'modelPath': modelPath,
+        'audioFilePath': audioFilePath,
+      },
+    );
+    final values = response?['segments'];
+    if (values is! List) {
+      return const <MoonshineFileSegment>[];
+    }
+    return values
+        .whereType<Map<Object?, Object?>>()
+        .map(MoonshineFileSegment.fromMap)
+        .where((segment) => segment.text.isNotEmpty)
+        .toList(growable: false);
+  }
+
   Future<DecodedPcmAudio> decodeAudioFileToPcm16({
     required String audioFilePath,
   }) async {
@@ -316,6 +338,33 @@ class DecodedPcmAudio {
 
   final Uint8List pcm16Audio;
   final int sampleRate;
+}
+
+class MoonshineFileSegment {
+  const MoonshineFileSegment({
+    required this.text,
+    required this.startTimeSeconds,
+    required this.durationSeconds,
+  });
+
+  factory MoonshineFileSegment.fromMap(Map<Object?, Object?> value) {
+    return MoonshineFileSegment(
+      text: value['text']?.toString().trim() ?? '',
+      startTimeSeconds: _doubleValue(value['startTimeSeconds']),
+      durationSeconds: _doubleValue(value['durationSeconds']),
+    );
+  }
+
+  static double _doubleValue(Object? value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+    return double.tryParse(value?.toString() ?? '') ?? 0;
+  }
+
+  final String text;
+  final double startTimeSeconds;
+  final double durationSeconds;
 }
 
 enum MoonshineAsrNativeEventType { status, partial, segment, error }

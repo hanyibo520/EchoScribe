@@ -206,6 +206,33 @@ private enum NativeBridgeFailure: Error {
             }
           }
         }
+      case "transcribeAudioFileWithMoonshine":
+        DispatchQueue.global(qos: .userInitiated).async {
+          do {
+            let response = try self.transcribeAudioFileWithMoonshine(arguments: call.arguments)
+            DispatchQueue.main.async {
+              result(response)
+            }
+          } catch NativeBridgeFailure.invalidArguments(let message) {
+            DispatchQueue.main.async {
+              result(FlutterError(code: "INVALID_ARGUMENTS", message: message, details: nil))
+            }
+          } catch NativeBridgeFailure.runtime(let message) {
+            DispatchQueue.main.async {
+              result(FlutterError(code: "MOONSHINE_FILE_FAILED", message: message, details: nil))
+            }
+          } catch {
+            DispatchQueue.main.async {
+              result(
+                FlutterError(
+                  code: "MOONSHINE_FILE_FAILED",
+                  message: error.localizedDescription,
+                  details: nil
+                )
+              )
+            }
+          }
+        }
       case "decodeAudioFileToPcm16":
         DispatchQueue.global(qos: .userInitiated).async {
           do {
@@ -819,6 +846,54 @@ private enum NativeBridgeFailure: Error {
       languageCode: languageCode
     )
     return ["text": text]
+  }
+
+  private func transcribeAudioFileWithMoonshine(arguments: Any?) throws -> [String: Any] {
+    guard let values = arguments as? [String: Any] else {
+      throw NativeBridgeFailure.invalidArguments("Missing Moonshine file arguments")
+    }
+    guard let modelPath = values["modelPath"] as? String, !modelPath.isEmpty else {
+      throw NativeBridgeFailure.invalidArguments("Missing Moonshine model path")
+    }
+    guard let audioFilePath = values["audioFilePath"] as? String, !audioFilePath.isEmpty else {
+      throw NativeBridgeFailure.invalidArguments("Missing audio file path")
+    }
+    guard FileManager.default.fileExists(atPath: audioFilePath) else {
+      throw NativeBridgeFailure.invalidArguments("Missing audio file at \(audioFilePath)")
+    }
+
+    let resolvedModelPath = try validateMoonshineModelPath(modelPath)
+    let samples = try decodeAudioFileSamples(filePath: audioFilePath)
+    if samples.isEmpty {
+      return ["segments": []]
+    }
+
+    let transcriber = try Transcriber(
+      modelPath: resolvedModelPath,
+      modelArch: ModelArch.tinyStreaming
+    )
+    defer {
+      transcriber.close()
+    }
+    let transcript = try transcriber.transcribeWithoutStreaming(
+      audioData: samples,
+      sampleRate: 16000
+    )
+    let segments = transcript.lines.compactMap { line -> [String: Any]? in
+      let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      if text.isEmpty {
+        return nil
+      }
+      return [
+        "text": text,
+        "startTimeSeconds": Double(line.startTime),
+        "durationSeconds": Double(line.duration)
+      ]
+    }
+    return [
+      "segments": segments,
+      "text": segments.compactMap { $0["text"] as? String }.joined(separator: "\n")
+    ]
   }
 
   private func decodeAudioFileToPcm16(arguments: Any?) throws -> [String: Any] {

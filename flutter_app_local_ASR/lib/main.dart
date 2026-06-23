@@ -431,7 +431,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       return;
     }
 
-    if (_hasReadyLiveAsr(initial, initialBridgeReport)) {
+    if (_isMoonshineReady(initial, initialBridgeReport)) {
       setState(() {
         _modelCheck = initial;
         _nativeBridgeReport = initialBridgeReport;
@@ -609,7 +609,33 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   }) async {
     var currentCheck = check;
     var currentBridgeReport = bridgeReport;
+    Object? moonshineError;
     Object? senseVoiceError;
+    if (currentCheck.isMoonshineTinyStreamingReady &&
+        currentBridgeReport.moonshine.isAvailable) {
+      try {
+        final moonshineSegments = await LocalNativeBridge.instance
+            .transcribeAudioFileWithMoonshine(
+              modelPath: currentCheck.moonshineTinyStreamingFiles.directory,
+              audioFilePath: picked.path,
+            );
+        if (moonshineSegments.isNotEmpty) {
+          return [
+            for (var i = 0; i < moonshineSegments.length; i += 1)
+              AsrSegment(
+                index: i + 1,
+                text: moonshineSegments[i].text,
+                createdAt: DateTime.now(),
+                engineName: 'Moonshine Tiny Streaming file: ${picked.name}',
+              ),
+          ];
+        }
+      } catch (error) {
+        moonshineError = error;
+        debugPrint('[ASR import] moonshine file transcription failed $error');
+      }
+    }
+
     if (!currentCheck.isFastSenseVoiceReady) {
       await _modelStore.installBundledModels(
         scope: ModelInstallScope.fastAsr,
@@ -671,10 +697,11 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
     if (!currentCheck.isWhisperModelReady) {
       final fallbackReason = senseVoiceError == null
-          ? 'SenseVoice did not recognize speech in ${picked.name}'
+          ? 'Moonshine/SenseVoice did not recognize speech in ${picked.name}'
           : 'SenseVoice file transcription failed: $senseVoiceError';
       throw StateError(
-        '$fallbackReason\nMissing whisper.cpp model: ${currentCheck.whisperModelPath}',
+        '${_fileAsrFallbackPrefix(moonshineError)}$fallbackReason\n'
+        'Missing whisper.cpp model: ${currentCheck.whisperModelPath}',
       );
     }
     if (!currentBridgeReport.whisperCpp.isAvailable) {
@@ -682,7 +709,8 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
           ? ''
           : 'SenseVoice file transcription failed: $senseVoiceError\n';
       throw StateError(
-        '$fallbackReason${currentBridgeReport.whisperCpp.reason ?? 'whisper.cpp is not available'}',
+        '${_fileAsrFallbackPrefix(moonshineError)}$fallbackReason'
+        '${currentBridgeReport.whisperCpp.reason ?? 'whisper.cpp is not available'}',
       );
     }
 
@@ -705,6 +733,13 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         engineName: 'whisper.cpp file: ${picked.name}',
       ),
     ];
+  }
+
+  String _fileAsrFallbackPrefix(Object? moonshineError) {
+    if (moonshineError == null) {
+      return '';
+    }
+    return 'Moonshine file transcription failed: $moonshineError\n';
   }
 
   Future<ModelCheckResult> _installWhisperFallbackModel(
