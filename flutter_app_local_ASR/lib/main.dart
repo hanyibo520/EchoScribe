@@ -24,8 +24,6 @@ import 'ui/meeting_picker_sheet.dart';
 import 'ui/recording_detail_page.dart';
 import 'ui/summary_detail_page.dart';
 
-const double _moonshineImportSpeedFactor = 1.3;
-
 void main() {
   runApp(const MeetingAsrApp());
 }
@@ -627,7 +625,6 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
             .transcribeAudioFileWithMoonshine(
               modelPath: currentCheck.moonshineTinyStreamingFiles.directory,
               audioFilePath: picked.path,
-              speedFactor: _moonshineImportSpeedFactor,
             );
         moonshineWatch.stop();
         debugPrint(

@@ -222,14 +222,12 @@ class LocalNativeBridge {
   Future<List<MoonshineFileSegment>> transcribeAudioFileWithMoonshine({
     required String modelPath,
     required String audioFilePath,
-    double speedFactor = 1.0,
   }) async {
     final response = await _channel.invokeMapMethod<String, Object?>(
       'transcribeAudioFileWithMoonshine',
       <String, Object?>{
         'modelPath': modelPath,
         'audioFilePath': audioFilePath,
-        'speedFactor': speedFactor,
       },
     );
     final values = response?['segments'];
