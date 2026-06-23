@@ -80,17 +80,21 @@ class ModelStore {
       ),
       vad: senseVoiceVad,
     );
+    final moonshineFilePaths = <String, String>{
+      for (final fileName in moonshineTinyStreamingFiles)
+        fileName: await _runtimeModelPath(
+          assetDirectory:
+              '$bundledModelAssetRoot/asr/moonshine_tiny_streaming_en',
+          fileName: fileName,
+          installedPath: p.join(paths.moonshineTinyStreamingRoot, fileName),
+        ),
+    };
     final moonshineFiles = MoonshineModelFiles(
-      directory: paths.moonshineTinyStreamingRoot,
-      files: <String, String>{
-        for (final fileName in moonshineTinyStreamingFiles)
-          fileName: await _runtimeModelPath(
-            assetDirectory:
-                '$bundledModelAssetRoot/asr/moonshine_tiny_streaming_en',
-            fileName: fileName,
-            installedPath: p.join(paths.moonshineTinyStreamingRoot, fileName),
-          ),
-      },
+      directory: _sharedModelDirectory(
+        moonshineFilePaths.values,
+        fallback: paths.moonshineTinyStreamingRoot,
+      ),
+      files: moonshineFilePaths,
     );
     final missingMoonshineTinyStreamingFiles = <String>[];
     for (final fileName in moonshineTinyStreamingFiles) {
@@ -463,6 +467,20 @@ class ModelStore {
       return bundledPath;
     }
     return installedPath;
+  }
+
+  String _sharedModelDirectory(
+    Iterable<String> filePaths, {
+    required String fallback,
+  }) {
+    final directories = <String>{};
+    for (final filePath in filePaths) {
+      if (filePath.isEmpty) {
+        return fallback;
+      }
+      directories.add(p.dirname(filePath));
+    }
+    return directories.length == 1 ? directories.single : fallback;
   }
 
   Future<void> _deleteEmptyDirectory(String path) async {

@@ -369,9 +369,14 @@ private enum NativeBridgeFailure: Error {
     let resolvedPath = try validateMoonshineModelPath(modelPath)
     let transcriber = try ensureMoonshineTranscriber(modelPath: resolvedPath)
     if !isMoonshineListening {
-      try transcriber.start()
-      isMoonshineListening = true
-      sendMoonshineEvent("moonshineStatus", text: "Listening with Moonshine Tiny Streaming")
+      do {
+        try transcriber.start()
+        isMoonshineListening = true
+        sendMoonshineEvent("moonshineStatus", text: "Listening with Moonshine Tiny Streaming")
+      } catch {
+        disposeMoonshine()
+        throw error
+      }
     }
     return ["started": true]
   }
