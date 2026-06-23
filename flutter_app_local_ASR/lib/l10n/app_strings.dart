@@ -34,6 +34,18 @@ class AppStrings {
   String get primaryAsrMissing => isZh
       ? '主 ASR 模型缺失，将继续使用后备链路'
       : 'Primary ASR model is missing; fallback chain will continue';
+  String get primaryAsrModel => isZh ? '主 ASR 模型' : 'Primary ASR model';
+  String get moonshineModelChoice => 'Moonshine';
+  String get sherpaModelChoice => 'Sherpa';
+  String selectedPrimaryAsrMissing(String modelName) {
+    return isZh
+        ? '所选 ASR 未就绪：$modelName'
+        : 'Selected ASR is not ready: $modelName';
+  }
+
+  String get primaryAsrChangeBlocked => isZh
+      ? '录音或导入进行中，暂不能切换 ASR 模型'
+      : 'ASR model cannot be changed while recording or importing';
   String get stoppingRecording => isZh ? '正在停止录音...' : 'Stopping recording...';
   String get bundledModelsInstalled =>
       isZh ? '本地模型已安装' : 'Local models installed';

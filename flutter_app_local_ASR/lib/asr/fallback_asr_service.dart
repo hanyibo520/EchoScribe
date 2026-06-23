@@ -24,6 +24,7 @@ class FallbackAsrService implements AsrEngine {
   final StreamController<String> _status = StreamController<String>.broadcast();
 
   AsrEngine? _activeEngine;
+  Set<String>? _enabledEngineNames;
 
   @override
   String get name => _activeEngine?.name ?? 'ASR fallback chain';
@@ -39,10 +40,22 @@ class FallbackAsrService implements AsrEngine {
   @override
   Stream<String> get status => _status.stream;
 
+  void useOnlyEngine(String engineName) {
+    _enabledEngineNames = {engineName};
+  }
+
+  Iterable<AsrEngine> get _enabledEngines {
+    final enabledEngineNames = _enabledEngineNames;
+    if (enabledEngineNames == null) {
+      return _engines;
+    }
+    return _engines.where((engine) => enabledEngineNames.contains(engine.name));
+  }
+
   @override
   Future<AsrAvailability> checkAvailability() async {
     final reasons = <String>[];
-    for (final engine in _engines) {
+    for (final engine in _enabledEngines) {
       final availability = await engine.checkAvailability();
       if (availability.isAvailable) {
         return const AsrAvailability.available();
@@ -57,7 +70,7 @@ class FallbackAsrService implements AsrEngine {
   Future<void> start() async {
     final errors = <String>[];
 
-    for (final engine in _engines) {
+    for (final engine in _enabledEngines) {
       final availability = await engine.checkAvailability();
       if (!availability.isAvailable) {
         errors.add('${engine.name}: ${availability.reason}');

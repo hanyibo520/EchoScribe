@@ -24,6 +24,31 @@ import 'ui/meeting_picker_sheet.dart';
 import 'ui/recording_detail_page.dart';
 import 'ui/summary_detail_page.dart';
 
+enum _PrimaryAsrModel { moonshine, sherpa }
+
+extension _PrimaryAsrModelInfo on _PrimaryAsrModel {
+  String get engineName {
+    return switch (this) {
+      _PrimaryAsrModel.moonshine => 'Moonshine Tiny Streaming',
+      _PrimaryAsrModel.sherpa => 'Sherpa-ONNX SenseVoice',
+    };
+  }
+
+  String label(AppStrings strings) {
+    return switch (this) {
+      _PrimaryAsrModel.moonshine => strings.moonshineModelChoice,
+      _PrimaryAsrModel.sherpa => strings.sherpaModelChoice,
+    };
+  }
+
+  String fullLabel(AppStrings strings) {
+    return switch (this) {
+      _PrimaryAsrModel.moonshine => strings.moonshineTinyStreaming,
+      _PrimaryAsrModel.sherpa => strings.sherpaSenseVoice,
+    };
+  }
+}
+
 void main() {
   runApp(const MeetingAsrApp());
 }
@@ -144,6 +169,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   bool _isSummarizing = false;
   bool _isInstallingModels = false;
   bool _isImportingAudio = false;
+  _PrimaryAsrModel _selectedPrimaryAsrModel = _PrimaryAsrModel.moonshine;
   int _selectedTab = 0;
 
   static const int _summaryTabIndex = 3;
@@ -161,6 +187,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         SystemAsrEngine(),
       ],
     );
+    _applySelectedPrimaryAsrModel();
     _senseVoiceFileTranscriber = SenseVoiceFileTranscriber(
       modelStore: _modelStore,
     );
@@ -199,6 +226,40 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     _prepareModels();
     _loadRecordings();
     _loadSummaries();
+  }
+
+  void _applySelectedPrimaryAsrModel() {
+    _asrService.useOnlyEngine(_selectedPrimaryAsrModel.engineName);
+  }
+
+  void _onPrimaryAsrModelChanged(_PrimaryAsrModel model) {
+    if (_selectedPrimaryAsrModel == model) {
+      return;
+    }
+    if (_isRecording || _isStoppingRecording || _isImportingAudio) {
+      setState(() {
+        _status = _StatusMessage(
+          (strings) => strings.primaryAsrChangeBlocked,
+          tone: _StatusTone.info,
+        );
+      });
+      return;
+    }
+
+    setState(() {
+      _selectedPrimaryAsrModel = model;
+      _applySelectedPrimaryAsrModel();
+      _status = _StatusMessage(
+        (strings) => _primaryAsrReadyStatus(
+          strings,
+          check: _modelCheck,
+          bridgeReport: _nativeBridgeReport,
+        ),
+        tone: _selectedPrimaryAsrReady(_modelCheck, _nativeBridgeReport)
+            ? _StatusTone.success
+            : _StatusTone.info,
+      );
+    });
   }
 
   Future<void> _loadSummaries() async {
@@ -431,7 +492,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       return;
     }
 
-    if (_isMoonshineReady(initial, initialBridgeReport)) {
+    if (_selectedPrimaryAsrReady(initial, initialBridgeReport)) {
       setState(() {
         _modelCheck = initial;
         _nativeBridgeReport = initialBridgeReport;
@@ -480,13 +541,11 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         _nativeBridgeReport = bridgeReport;
         _isInstallingModels = false;
         _status = _StatusMessage(
-          _hasReadyLiveAsr(result, bridgeReport)
-              ? (strings) => _primaryAsrReadyStatus(
-                  strings,
-                  check: result,
-                  bridgeReport: bridgeReport,
-                )
-              : (strings) => strings.primaryAsrMissing,
+          (strings) => _primaryAsrReadyStatus(
+            strings,
+            check: result,
+            bridgeReport: bridgeReport,
+          ),
           tone: _hasReadyLiveAsr(result, bridgeReport)
               ? _StatusTone.success
               : _StatusTone.info,
@@ -576,7 +635,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     ModelCheckResult check,
     NativeBridgeReport bridgeReport,
   ) {
-    return _isMoonshineReady(check, bridgeReport) || check.isSenseVoiceReady;
+    return _isSelectedPrimaryAsrReady(check, bridgeReport);
   }
 
   bool _isMoonshineReady(
@@ -587,18 +646,43 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         bridgeReport.moonshine.isAvailable;
   }
 
+  bool _isSelectedPrimaryAsrReady(
+    ModelCheckResult check,
+    NativeBridgeReport bridgeReport,
+  ) {
+    return switch (_selectedPrimaryAsrModel) {
+      _PrimaryAsrModel.moonshine => _isMoonshineReady(check, bridgeReport),
+      _PrimaryAsrModel.sherpa => check.isSenseVoiceReady,
+    };
+  }
+
+  bool _selectedPrimaryAsrReady(
+    ModelCheckResult? check,
+    NativeBridgeReport? bridgeReport,
+  ) {
+    if (check == null || bridgeReport == null) {
+      return false;
+    }
+    return _isSelectedPrimaryAsrReady(check, bridgeReport);
+  }
+
   String _primaryAsrReadyStatus(
     AppStrings strings, {
-    required ModelCheckResult check,
-    required NativeBridgeReport bridgeReport,
+    required ModelCheckResult? check,
+    required NativeBridgeReport? bridgeReport,
   }) {
-    if (_isMoonshineReady(check, bridgeReport)) {
-      return strings.primaryAsrReadyMoonshine;
+    if (check == null || bridgeReport == null) {
+      return strings.checkingLocalModels;
     }
-    if (check.isSenseVoiceReady) {
-      return strings.primaryAsrReady;
+    if (_isSelectedPrimaryAsrReady(check, bridgeReport)) {
+      return switch (_selectedPrimaryAsrModel) {
+        _PrimaryAsrModel.moonshine => strings.primaryAsrReadyMoonshine,
+        _PrimaryAsrModel.sherpa => strings.primaryAsrReady,
+      };
     }
-    return strings.primaryAsrMissing;
+    return strings.selectedPrimaryAsrMissing(
+      _selectedPrimaryAsrModel.fullLabel(strings),
+    );
   }
 
   Future<List<AsrSegment>> _transcribeImportedAudio({
@@ -613,17 +697,21 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       '[ASR timing] import start file=${picked.name} path=${picked.path} '
       'sourceBytes=$sourceBytes',
     );
-    var currentCheck = check;
-    var currentBridgeReport = bridgeReport;
-    Object? moonshineError;
-    Object? senseVoiceError;
-    if (currentCheck.isMoonshineTinyStreamingReady &&
-        currentBridgeReport.moonshine.isAvailable) {
-      final moonshineWatch = Stopwatch()..start();
-      try {
+    switch (_selectedPrimaryAsrModel) {
+      case _PrimaryAsrModel.moonshine:
+        if (!check.isMoonshineTinyStreamingReady ||
+            !bridgeReport.moonshine.isAvailable) {
+          throw StateError(
+            bridgeReport.moonshine.reason ??
+                strings.selectedPrimaryAsrMissing(
+                  _selectedPrimaryAsrModel.fullLabel(strings),
+                ),
+          );
+        }
+        final moonshineWatch = Stopwatch()..start();
         final moonshineSegments = await LocalNativeBridge.instance
             .transcribeAudioFileWithMoonshine(
-              modelPath: currentCheck.moonshineTinyStreamingFiles.directory,
+              modelPath: check.moonshineTinyStreamingFiles.directory,
               audioFilePath: picked.path,
             );
         moonshineWatch.stop();
@@ -633,42 +721,38 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
           '${moonshineSegments.length} chars='
           '${_segmentTextLength(moonshineSegments.map((segment) => segment.text))}',
         );
-        if (moonshineSegments.isNotEmpty) {
-          totalWatch.stop();
-          debugPrint(
-            '[ASR timing] import done engine=Moonshine totalMs='
-            '${totalWatch.elapsedMilliseconds} file=${picked.name}',
-          );
-          return [
-            for (var i = 0; i < moonshineSegments.length; i += 1)
-              AsrSegment(
-                index: i + 1,
-                text: moonshineSegments[i].text,
-                createdAt: DateTime.now(),
-                engineName: 'Moonshine Tiny Streaming file: ${picked.name}',
-              ),
-          ];
-        }
-      } catch (error) {
-        moonshineWatch.stop();
-        moonshineError = error;
+        totalWatch.stop();
         debugPrint(
-          '[ASR timing] import engine=Moonshine failed elapsedMs='
-          '${moonshineWatch.elapsedMilliseconds} error=$error',
+          '[ASR timing] import done engine=Moonshine totalMs='
+          '${totalWatch.elapsedMilliseconds} file=${picked.name}',
         );
-      }
-    }
+        return [
+          for (var i = 0; i < moonshineSegments.length; i += 1)
+            AsrSegment(
+              index: i + 1,
+              text: moonshineSegments[i].text,
+              createdAt: DateTime.now(),
+              engineName: 'Moonshine Tiny Streaming file: ${picked.name}',
+            ),
+        ];
+      case _PrimaryAsrModel.sherpa:
+        var currentCheck = check;
+        if (!currentCheck.isFastSenseVoiceReady) {
+          await _modelStore.installBundledModels(
+            scope: ModelInstallScope.fastAsr,
+            onProgress: (_) {},
+          );
+          currentCheck = await _modelStore.inspect();
+        }
+        if (!currentCheck.hasFileTranscriptionSenseVoiceReady) {
+          throw StateError(
+            strings.selectedPrimaryAsrMissing(
+              _selectedPrimaryAsrModel.fullLabel(strings),
+            ),
+          );
+        }
 
-    if (!currentCheck.isFastSenseVoiceReady) {
-      await _modelStore.installBundledModels(
-        scope: ModelInstallScope.fastAsr,
-        onProgress: (_) {},
-      );
-      currentCheck = await _modelStore.inspect();
-    }
-    if (currentCheck.hasFileTranscriptionSenseVoiceReady) {
-      final senseVoiceWatch = Stopwatch()..start();
-      try {
+        final senseVoiceWatch = Stopwatch()..start();
         final decodeWatch = Stopwatch()..start();
         final decoded = await LocalNativeBridge.instance.decodeAudioFileToPcm16(
           audioFilePath: picked.path,
@@ -704,90 +788,13 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
           '${segments.length} chars='
           '${_segmentTextLength(segments.map((segment) => segment.text))}',
         );
-        if (segments.isNotEmpty) {
-          totalWatch.stop();
-          debugPrint(
-            '[ASR timing] import done engine=SenseVoice totalMs='
-            '${totalWatch.elapsedMilliseconds} file=${picked.name}',
-          );
-          return segments;
-        }
-      } catch (error) {
-        senseVoiceWatch.stop();
-        senseVoiceError = error;
+        totalWatch.stop();
         debugPrint(
-          '[ASR timing] import engine=SenseVoice failed elapsedMs='
-          '${senseVoiceWatch.elapsedMilliseconds} error=$error',
+          '[ASR timing] import done engine=SenseVoice totalMs='
+          '${totalWatch.elapsedMilliseconds} file=${picked.name}',
         );
-      }
-    } else {
-      senseVoiceError = 'Missing SenseVoice file transcription profiles';
+        return segments;
     }
-
-    if (!currentCheck.isWhisperModelReady) {
-      currentCheck = await _installWhisperFallbackModel(strings);
-      currentBridgeReport = await _inspectNativeBridges(currentCheck);
-      if (!mounted) {
-        return const <AsrSegment>[];
-      }
-      setState(() {
-        _modelCheck = currentCheck;
-        _nativeBridgeReport = currentBridgeReport;
-        _status = _StatusMessage(
-          (strings) => strings.transcribingAudioFile(picked.name),
-        );
-      });
-    }
-
-    if (!currentCheck.isWhisperModelReady) {
-      final fallbackReason = senseVoiceError == null
-          ? 'Moonshine/SenseVoice did not recognize speech in ${picked.name}'
-          : 'SenseVoice file transcription failed: $senseVoiceError';
-      throw StateError(
-        '${_fileAsrFallbackPrefix(moonshineError)}$fallbackReason\n'
-        'Missing whisper.cpp model: ${currentCheck.whisperModelPath}',
-      );
-    }
-    if (!currentBridgeReport.whisperCpp.isAvailable) {
-      final fallbackReason = senseVoiceError == null
-          ? ''
-          : 'SenseVoice file transcription failed: $senseVoiceError\n';
-      throw StateError(
-        '${_fileAsrFallbackPrefix(moonshineError)}$fallbackReason'
-        '${currentBridgeReport.whisperCpp.reason ?? 'whisper.cpp is not available'}',
-      );
-    }
-
-    final whisperWatch = Stopwatch()..start();
-    final text = await LocalNativeBridge.instance
-        .transcribeAudioFileWithWhisperCpp(
-          modelPath: currentCheck.whisperModelPath,
-          audioFilePath: picked.path,
-          languageCode: strings.isZh ? 'zh' : 'en',
-        );
-    whisperWatch.stop();
-    final trimmed = text.trim();
-    debugPrint(
-      '[ASR timing] import engine=Whisper elapsedMs='
-      '${whisperWatch.elapsedMilliseconds} chars=${trimmed.length}',
-    );
-    if (trimmed.isEmpty) {
-      return const <AsrSegment>[];
-    }
-
-    totalWatch.stop();
-    debugPrint(
-      '[ASR timing] import done engine=Whisper totalMs='
-      '${totalWatch.elapsedMilliseconds} file=${picked.name}',
-    );
-    return [
-      AsrSegment(
-        index: 1,
-        text: trimmed,
-        createdAt: DateTime.now(),
-        engineName: 'whisper.cpp file: ${picked.name}',
-      ),
-    ];
   }
 
   Future<int> _safeFileLength(String path) async {
@@ -804,35 +811,6 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       length += text.trim().length;
     }
     return length;
-  }
-
-  String _fileAsrFallbackPrefix(Object? moonshineError) {
-    if (moonshineError == null) {
-      return '';
-    }
-    return 'Moonshine file transcription failed: $moonshineError\n';
-  }
-
-  Future<ModelCheckResult> _installWhisperFallbackModel(
-    AppStrings strings,
-  ) async {
-    await _modelStore.installBundledModels(
-      scope: ModelInstallScope.offlineTranscription,
-      onProgress: (progress) {
-        if (!mounted) {
-          return;
-        }
-        setState(() {
-          _status = _StatusMessage(
-            (strings) => strings.installingBundledModel(
-              progress.label,
-              _formatInstallProgress(progress),
-            ),
-          );
-        });
-      },
-    );
-    return _modelStore.inspect();
   }
 
   Future<void> _toggleRecording() async {
@@ -894,6 +872,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       });
 
       final startWatch = Stopwatch()..start();
+      _applySelectedPrimaryAsrModel();
       await _asrService.start();
       startWatch.stop();
       debugPrint(
@@ -1140,6 +1119,10 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         modelCheck: check,
         nativeBridgeReport: _nativeBridgeReport,
         isInstallingModels: _isInstallingModels,
+        selectedPrimaryAsrModel: _selectedPrimaryAsrModel,
+        canChangePrimaryAsrModel:
+            !_isRecording && !_isStoppingRecording && !_isImportingAudio,
+        onPrimaryAsrModelChanged: _onPrimaryAsrModelChanged,
         onRefresh: _prepareModels,
       ),
       _RecordWorkspace(
@@ -1365,6 +1348,9 @@ class _StatusPanel extends StatelessWidget {
     required this.modelCheck,
     required this.nativeBridgeReport,
     required this.isInstallingModels,
+    required this.selectedPrimaryAsrModel,
+    required this.canChangePrimaryAsrModel,
+    required this.onPrimaryAsrModelChanged,
   });
 
   final String status;
@@ -1372,6 +1358,9 @@ class _StatusPanel extends StatelessWidget {
   final ModelCheckResult? modelCheck;
   final NativeBridgeReport? nativeBridgeReport;
   final bool isInstallingModels;
+  final _PrimaryAsrModel selectedPrimaryAsrModel;
+  final bool canChangePrimaryAsrModel;
+  final ValueChanged<_PrimaryAsrModel> onPrimaryAsrModelChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1412,6 +1401,12 @@ class _StatusPanel extends StatelessWidget {
             ),
             if (check != null) ...[
               const SizedBox(height: 16),
+              _PrimaryAsrSelector(
+                selectedModel: selectedPrimaryAsrModel,
+                enabled: canChangePrimaryAsrModel,
+                onChanged: onPrimaryAsrModelChanged,
+              ),
+              const SizedBox(height: 14),
               _ModelStatusRow(
                 label: strings.moonshineTinyStreaming,
                 value: _bridgeValue(
@@ -1503,6 +1498,62 @@ class _StatusPanel extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _PrimaryAsrSelector extends StatelessWidget {
+  const _PrimaryAsrSelector({
+    required this.selectedModel,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final _PrimaryAsrModel selectedModel;
+  final bool enabled;
+  final ValueChanged<_PrimaryAsrModel> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final strings = AppStrings.of(context);
+    final textTheme = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          strings.primaryAsrModel,
+          style: textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: double.infinity,
+          child: SegmentedButton<_PrimaryAsrModel>(
+            showSelectedIcon: false,
+            selected: {selectedModel},
+            onSelectionChanged: enabled
+                ? (values) => onChanged(values.first)
+                : null,
+            segments: [
+              ButtonSegment<_PrimaryAsrModel>(
+                value: _PrimaryAsrModel.moonshine,
+                icon: const Icon(Icons.speed_rounded, size: 18),
+                label: Text(
+                  _PrimaryAsrModel.moonshine.label(strings),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              ButtonSegment<_PrimaryAsrModel>(
+                value: _PrimaryAsrModel.sherpa,
+                icon: const Icon(Icons.graphic_eq_rounded, size: 18),
+                label: Text(
+                  _PrimaryAsrModel.sherpa.label(strings),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -2099,6 +2150,9 @@ class _ModelWorkspace extends StatelessWidget {
     required this.modelCheck,
     required this.nativeBridgeReport,
     required this.isInstallingModels,
+    required this.selectedPrimaryAsrModel,
+    required this.canChangePrimaryAsrModel,
+    required this.onPrimaryAsrModelChanged,
     required this.onRefresh,
   });
 
@@ -2107,6 +2161,9 @@ class _ModelWorkspace extends StatelessWidget {
   final ModelCheckResult? modelCheck;
   final NativeBridgeReport? nativeBridgeReport;
   final bool isInstallingModels;
+  final _PrimaryAsrModel selectedPrimaryAsrModel;
+  final bool canChangePrimaryAsrModel;
+  final ValueChanged<_PrimaryAsrModel> onPrimaryAsrModelChanged;
   final VoidCallback onRefresh;
 
   @override
@@ -2124,6 +2181,9 @@ class _ModelWorkspace extends StatelessWidget {
           modelCheck: modelCheck,
           nativeBridgeReport: nativeBridgeReport,
           isInstallingModels: isInstallingModels,
+          selectedPrimaryAsrModel: selectedPrimaryAsrModel,
+          canChangePrimaryAsrModel: canChangePrimaryAsrModel,
+          onPrimaryAsrModelChanged: onPrimaryAsrModelChanged,
         ),
       ],
     );
