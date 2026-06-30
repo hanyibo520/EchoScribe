@@ -354,8 +354,8 @@ class _SpeakerTurnRow extends StatelessWidget {
                 '${_formatDuration(turn.startMs)} - ${_formatDuration(turn.endMs)}',
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
-              if (speakerMatch?.isSelfMatch ?? false)
-                _SelfBadge(label: AppStrings.of(context).selfSpeakerBadge),
+              if (speakerMatch?.isProfileMatch ?? false)
+                _MatchBadge(label: AppStrings.of(context).speakerMatchedBadge),
             ],
           ),
         ),
@@ -364,8 +364,8 @@ class _SpeakerTurnRow extends StatelessWidget {
   }
 }
 
-class _SelfBadge extends StatelessWidget {
-  const _SelfBadge({required this.label});
+class _MatchBadge extends StatelessWidget {
+  const _MatchBadge({required this.label});
 
   final String label;
 

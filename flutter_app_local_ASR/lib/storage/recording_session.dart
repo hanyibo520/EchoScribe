@@ -225,6 +225,8 @@ class SpeakerProfileMatch {
   final bool isSelfMatch;
   final double threshold;
 
+  bool get isProfileMatch => matchedProfileId != null;
+
   factory SpeakerProfileMatch.fromMap(Map<String, Object?> map) {
     return SpeakerProfileMatch(
       id: map['id'] as int?,

@@ -420,12 +420,27 @@ class RecordingDatabase {
   }
 
   Future<VoiceProfile?> getActiveVoiceProfile() async {
+    final profiles = await listVoiceProfiles();
+    return profiles.isEmpty ? null : profiles.first;
+  }
+
+  Future<List<VoiceProfile>> listVoiceProfiles() async {
     final db = await database;
     final rows = await db.query(
       'voice_profiles',
       where: 'is_active = ?',
       whereArgs: [1],
       orderBy: 'updated_at DESC',
+    );
+    return rows.map(_voiceProfileFromMap).toList();
+  }
+
+  Future<VoiceProfile?> getVoiceProfile(int id) async {
+    final db = await database;
+    final rows = await db.query(
+      'voice_profiles',
+      where: 'id = ?',
+      whereArgs: [id],
       limit: 1,
     );
     if (rows.isEmpty) {
@@ -434,7 +449,8 @@ class RecordingDatabase {
     return _voiceProfileFromMap(rows.first);
   }
 
-  Future<VoiceProfile> saveSelfVoiceProfile({
+  Future<VoiceProfile> saveVoiceProfile({
+    int? id,
     required String displayName,
     required Float32List embedding,
     required String sampleAudioPath,
@@ -443,11 +459,11 @@ class RecordingDatabase {
   }) async {
     final db = await database;
     final now = DateTime.now();
-    final existing = await getActiveVoiceProfile();
+    final existing = id == null ? null : await getVoiceProfile(id);
     final trimmedName = displayName.trim().isEmpty ? '我' : displayName.trim();
 
     if (existing == null) {
-      final id = await db.insert('voice_profiles', {
+      final insertedId = await db.insert('voice_profiles', {
         'display_name': trimmedName,
         'embedding': _float32ToBytes(embedding),
         'dimension': embedding.length,
@@ -459,7 +475,7 @@ class RecordingDatabase {
         'updated_at': now.millisecondsSinceEpoch,
       });
       return VoiceProfile(
-        id: id,
+        id: insertedId,
         displayName: trimmedName,
         embedding: embedding,
         sampleAudioPath: sampleAudioPath,
@@ -497,8 +513,28 @@ class RecordingDatabase {
     );
   }
 
-  Future<VoiceProfile?> updateActiveVoiceProfileName(String displayName) async {
-    final existing = await getActiveVoiceProfile();
+  Future<VoiceProfile> saveSelfVoiceProfile({
+    required String displayName,
+    required Float32List embedding,
+    required String sampleAudioPath,
+    required int sampleRate,
+    required int durationMs,
+  }) async {
+    return saveVoiceProfile(
+      id: (await getActiveVoiceProfile())?.id,
+      displayName: displayName,
+      embedding: embedding,
+      sampleAudioPath: sampleAudioPath,
+      sampleRate: sampleRate,
+      durationMs: durationMs,
+    );
+  }
+
+  Future<VoiceProfile?> updateVoiceProfileName(
+    int id,
+    String displayName,
+  ) async {
+    final existing = await getVoiceProfile(id);
     if (existing == null) {
       return null;
     }
@@ -523,8 +559,16 @@ class RecordingDatabase {
     );
   }
 
-  Future<VoiceProfile?> deleteActiveVoiceProfile() async {
+  Future<VoiceProfile?> updateActiveVoiceProfileName(String displayName) async {
     final existing = await getActiveVoiceProfile();
+    if (existing == null || existing.id == null) {
+      return null;
+    }
+    return updateVoiceProfileName(existing.id!, displayName);
+  }
+
+  Future<VoiceProfile?> deleteVoiceProfile(int id) async {
+    final existing = await getVoiceProfile(id);
     if (existing == null) {
       return null;
     }
@@ -535,6 +579,14 @@ class RecordingDatabase {
       whereArgs: [existing.id],
     );
     return existing;
+  }
+
+  Future<VoiceProfile?> deleteActiveVoiceProfile() async {
+    final existing = await getActiveVoiceProfile();
+    if (existing == null || existing.id == null) {
+      return null;
+    }
+    return deleteVoiceProfile(existing.id!);
   }
 
   Future<String> nextSummaryTitle({required bool isZh}) async {

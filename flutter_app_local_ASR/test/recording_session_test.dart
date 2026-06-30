@@ -69,6 +69,7 @@ void main() {
     expect(profile.dimension, 2);
     expect(profile.isActive, isTrue);
     expect(match.displayLabel, 'Alice');
+    expect(match.isProfileMatch, isTrue);
     expect(match.isSelfMatch, isTrue);
     expect(match.threshold, 0.6);
   });

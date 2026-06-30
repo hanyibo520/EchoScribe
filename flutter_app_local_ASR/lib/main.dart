@@ -158,7 +158,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   final List<AsrSegment> _liveSegments = [];
   List<RecordingSession> _recordings = [];
   List<MeetingSummaryRecord> _summaries = [];
-  VoiceProfile? _voiceProfile;
+  List<VoiceProfile> _voiceProfiles = const <VoiceProfile>[];
   RecordingSession? _selectedRecording;
   DateTime? _recordingStartedAt;
   AsrPartial? _partial;
@@ -181,6 +181,8 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   bool _isRecordingVoiceProfile = false;
   bool _isSavingVoiceProfile = false;
   Duration _voiceProfileElapsed = Duration.zero;
+  int? _recordingVoiceProfileId;
+  String? _recordingVoiceProfileName;
   _PrimaryAsrModel _selectedPrimaryAsrModel = _PrimaryAsrModel.moonshine;
   int _selectedTab = 0;
 
@@ -241,7 +243,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     _prepareModels();
     _loadRecordings();
     _loadSummaries();
-    _loadVoiceProfile();
+    _loadVoiceProfiles();
   }
 
   void _applySelectedPrimaryAsrModel() {
@@ -310,7 +312,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     if (state == AppLifecycleState.resumed) {
       unawaited(_loadSummaries());
       unawaited(_loadRecordings());
-      unawaited(_loadVoiceProfile());
+      unawaited(_loadVoiceProfiles());
     }
   }
 
@@ -322,28 +324,55 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     setState(() => _recordings = recordings);
   }
 
-  Future<void> _loadVoiceProfile() async {
-    final profile = await RecordingDatabase.instance.getActiveVoiceProfile();
+  Future<void> _loadVoiceProfiles() async {
+    final profiles = await RecordingDatabase.instance.listVoiceProfiles();
     if (!mounted) {
       return;
     }
-    setState(() => _voiceProfile = profile);
+    setState(() => _voiceProfiles = profiles);
   }
 
-  Future<void> _toggleVoiceProfileRecording() async {
+  Future<void> _stopCurrentVoiceProfileRecording() async {
     if (_isRecordingVoiceProfile) {
       await _stopVoiceProfileRecording();
-      return;
     }
-    await _startVoiceProfileRecording();
   }
 
-  Future<void> _startVoiceProfileRecording() async {
+  Future<void> _addVoiceProfile() async {
+    if (_isRecordingVoiceProfile || _isSavingVoiceProfile) {
+      return;
+    }
+    final strings = AppStrings.of(context);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => _VoiceProfileNameDialog(
+        initialName: strings.defaultVoiceProfileName(_voiceProfiles.length + 1),
+        title: strings.addVoiceProfile,
+      ),
+    );
+    if (!mounted || name == null || name.trim().isEmpty) {
+      return;
+    }
+    await _startVoiceProfileRecording(displayName: name.trim());
+  }
+
+  Future<void> _reRecordVoiceProfile(VoiceProfile profile) async {
+    await _startVoiceProfileRecording(
+      profileId: profile.id,
+      displayName: profile.displayName,
+    );
+  }
+
+  Future<void> _startVoiceProfileRecording({
+    int? profileId,
+    required String displayName,
+  }) async {
     if (_isRecording ||
         _isStoppingRecording ||
         _isImportingAudio ||
         _isSummarizing ||
         _isInstallingModels ||
+        _isRecordingVoiceProfile ||
         _isSavingVoiceProfile) {
       return;
     }
@@ -377,7 +406,11 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         _modelCheck = check;
         _isRecordingVoiceProfile = true;
         _voiceProfileElapsed = Duration.zero;
-        _status = _StatusMessage((strings) => strings.recordingVoiceProfile);
+        _recordingVoiceProfileId = profileId;
+        _recordingVoiceProfileName = displayName.trim();
+        _status = _StatusMessage(
+          (strings) => strings.recordingVoiceProfile(displayName.trim()),
+        );
       });
     } catch (error) {
       if (!mounted) {
@@ -386,6 +419,8 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       setState(() {
         _isRecordingVoiceProfile = false;
         _voiceProfileElapsed = Duration.zero;
+        _recordingVoiceProfileId = null;
+        _recordingVoiceProfileName = null;
         _status = _StatusMessage(
           (strings) => strings.errorMessage(error),
           tone: _StatusTone.error,
@@ -398,10 +433,15 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     final appStrings = AppStrings.of(context);
     _voiceProfileTimer?.cancel();
     _voiceProfileTimer = null;
+    final profileId = _recordingVoiceProfileId;
+    final profileName =
+        _recordingVoiceProfileName ?? appStrings.defaultVoiceProfileName(1);
     setState(() {
       _isRecordingVoiceProfile = false;
       _isSavingVoiceProfile = true;
-      _status = _StatusMessage((strings) => strings.savingVoiceProfile);
+      _status = _StatusMessage(
+        (strings) => strings.savingVoiceProfile(profileName),
+      );
     });
 
     Pcm16AudioFile? sampleFile;
@@ -423,14 +463,17 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         await _deleteFileIfExists(sampleFile.path);
         throw StateError(appStrings.voiceProfileEmbeddingEmpty);
       }
-      final profile = await RecordingDatabase.instance.saveSelfVoiceProfile(
-        displayName: _voiceProfile?.displayName ?? appStrings.defaultSelfName,
+      final previousProfile = profileId == null
+          ? null
+          : await RecordingDatabase.instance.getVoiceProfile(profileId);
+      final profile = await RecordingDatabase.instance.saveVoiceProfile(
+        id: profileId,
+        displayName: profileName,
         embedding: embedding.values,
         sampleAudioPath: sampleFile.path,
         sampleRate: sampleFile.sampleRate,
         durationMs: sampleFile.durationMs,
       );
-      final previousProfile = _voiceProfile;
       if (previousProfile != null &&
           previousProfile.sampleAudioPath != sampleFile.path) {
         unawaited(_deleteFileIfExists(previousProfile.sampleAudioPath));
@@ -438,10 +481,16 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       if (!mounted) {
         return;
       }
+      final profiles = await RecordingDatabase.instance.listVoiceProfiles();
+      if (!mounted) {
+        return;
+      }
       setState(() {
-        _voiceProfile = profile;
+        _voiceProfiles = profiles;
         _isSavingVoiceProfile = false;
         _voiceProfileElapsed = Duration.zero;
+        _recordingVoiceProfileId = null;
+        _recordingVoiceProfileName = null;
         _status = _StatusMessage(
           (strings) => strings.voiceProfileSaved(profile.displayName),
           tone: _StatusTone.success,
@@ -454,6 +503,8 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       setState(() {
         _isSavingVoiceProfile = false;
         _voiceProfileElapsed = Duration.zero;
+        _recordingVoiceProfileId = null;
+        _recordingVoiceProfileName = null;
         _status = _StatusMessage(
           (strings) => strings.errorMessage(error),
           tone: _StatusTone.error,
@@ -462,9 +513,9 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     }
   }
 
-  Future<void> _renameVoiceProfile() async {
-    final profile = _voiceProfile;
-    if (profile == null) {
+  Future<void> _renameVoiceProfile(VoiceProfile profile) async {
+    final profileId = profile.id;
+    if (profileId == null) {
       return;
     }
     final name = await showDialog<String>(
@@ -475,13 +526,19 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     if (name == null || name.trim().isEmpty) {
       return;
     }
-    final updated = await RecordingDatabase.instance
-        .updateActiveVoiceProfileName(name);
+    final updated = await RecordingDatabase.instance.updateVoiceProfileName(
+      profileId,
+      name,
+    );
     if (!mounted || updated == null) {
       return;
     }
+    final profiles = await RecordingDatabase.instance.listVoiceProfiles();
+    if (!mounted) {
+      return;
+    }
     setState(() {
-      _voiceProfile = updated;
+      _voiceProfiles = profiles;
       _status = _StatusMessage(
         (strings) => strings.voiceProfileRenamed(updated.displayName),
         tone: _StatusTone.success,
@@ -489,18 +546,29 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     });
   }
 
-  Future<void> _deleteVoiceProfile() async {
-    final deleted = await RecordingDatabase.instance.deleteActiveVoiceProfile();
-    if (deleted != null) {
-      await _deleteFileIfExists(deleted.sampleAudioPath);
+  Future<void> _deleteVoiceProfile(VoiceProfile profile) async {
+    final profileId = profile.id;
+    if (profileId == null) {
+      return;
     }
+    final deleted = await RecordingDatabase.instance.deleteVoiceProfile(
+      profileId,
+    );
+    if (deleted == null) {
+      return;
+    }
+    await _deleteFileIfExists(deleted.sampleAudioPath);
+    if (!mounted) {
+      return;
+    }
+    final profiles = await RecordingDatabase.instance.listVoiceProfiles();
     if (!mounted) {
       return;
     }
     setState(() {
-      _voiceProfile = null;
+      _voiceProfiles = profiles;
       _status = _StatusMessage(
-        (strings) => strings.voiceProfileDeleted,
+        (strings) => strings.voiceProfileDeleted(profile.displayName),
         tone: _StatusTone.success,
       );
     });
@@ -1146,7 +1214,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   Future<void> _analyzeSpeakersForRecording(RecordingSession session) async {
     await _runSpeakerAnalysisForRecording(
       session,
-      voiceProfile: await RecordingDatabase.instance.getActiveVoiceProfile(),
+      voiceProfiles: await RecordingDatabase.instance.listVoiceProfiles(),
     );
     await _loadRecordings();
   }
@@ -1155,13 +1223,13 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     if (!mounted) {
       return;
     }
-    final profile =
-        _voiceProfile ??
-        await RecordingDatabase.instance.getActiveVoiceProfile();
-    if (profile == null) {
+    final profiles = _voiceProfiles.isNotEmpty
+        ? _voiceProfiles
+        : await RecordingDatabase.instance.listVoiceProfiles();
+    if (profiles.isEmpty) {
       setState(() {
         _status = _StatusMessage(
-          (strings) => strings.speakerAutoAnalysisSkippedNoVoiceProfile,
+          (strings) => strings.speakerAutoAnalysisSkippedNoVoiceProfiles,
           tone: _StatusTone.info,
         );
       });
@@ -1196,7 +1264,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       _status = _StatusMessage((strings) => strings.analyzingSpeakers);
     });
     try {
-      await _runSpeakerAnalysisForRecording(session, voiceProfile: profile);
+      await _runSpeakerAnalysisForRecording(session, voiceProfiles: profiles);
       if (!mounted) {
         return;
       }
@@ -1221,7 +1289,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
   Future<void> _runSpeakerAnalysisForRecording(
     RecordingSession session, {
-    VoiceProfile? voiceProfile,
+    List<VoiceProfile> voiceProfiles = const <VoiceProfile>[],
   }) async {
     final check = await _modelStore.inspect();
     if (!check.isSherpaSpeakerProcessingReady) {
@@ -1283,7 +1351,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     final matches = await _speakerProfileMatches(
       recordingId: session.id,
       embeddings: embeddings,
-      voiceProfile: voiceProfile,
+      voiceProfiles: voiceProfiles,
     );
 
     await RecordingDatabase.instance.saveSpeakerAnalysis(
@@ -1297,31 +1365,40 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   Future<List<SpeakerProfileMatch>> _speakerProfileMatches({
     required int recordingId,
     required List<SpeakerEmbeddingRecord> embeddings,
-    required VoiceProfile? voiceProfile,
+    required List<VoiceProfile> voiceProfiles,
   }) async {
-    if (voiceProfile == null || embeddings.isEmpty) {
+    final profiles = [
+      for (final profile in voiceProfiles)
+        if (profile.id != null) profile,
+    ];
+    if (profiles.isEmpty || embeddings.isEmpty) {
       return const <SpeakerProfileMatch>[];
     }
 
     final strings = AppStrings.of(context);
+    final profilesBySearchKey = <String, VoiceProfile>{
+      for (final profile in profiles) 'profile:${profile.id}': profile,
+    };
+    final referenceEmbeddings = <String, Float32List>{
+      for (final entry in profilesBySearchKey.entries)
+        entry.key: entry.value.embedding,
+    };
     final matches = <SpeakerProfileMatch>[];
     for (final embedding in embeddings) {
-      final matchedName = await _speakerService.searchSpeakerEmbedding(
+      final matchedKey = await _speakerService.searchSpeakerEmbedding(
         embedding: embedding.embedding,
-        referenceEmbeddings: <String, Float32List>{
-          voiceProfile.displayName: voiceProfile.embedding,
-        },
+        referenceEmbeddings: referenceEmbeddings,
       );
-      final isSelfMatch = matchedName.isNotEmpty;
+      final matchedProfile = profilesBySearchKey[matchedKey];
       matches.add(
         SpeakerProfileMatch(
           recordingId: recordingId,
           speakerLabel: embedding.speakerLabel,
-          matchedProfileId: isSelfMatch ? voiceProfile.id : null,
-          displayLabel: isSelfMatch
-              ? voiceProfile.displayName
-              : strings.otherSpeakerLabel(embedding.speakerLabel),
-          isSelfMatch: isSelfMatch,
+          matchedProfileId: matchedProfile?.id,
+          displayLabel: matchedProfile == null
+              ? strings.otherSpeakerLabel(embedding.speakerLabel)
+              : matchedProfile.displayName,
+          isSelfMatch: matchedProfile != null,
           threshold: SherpaSpeakerService.defaultSpeakerMatchThreshold,
         ),
       );
@@ -1722,10 +1799,11 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
             _isImportingAudio ||
             _isRecordingVoiceProfile ||
             _isSavingVoiceProfile,
-        voiceProfile: _voiceProfile,
+        voiceProfiles: _voiceProfiles,
         isRecordingVoiceProfile: _isRecordingVoiceProfile,
         isSavingVoiceProfile: _isSavingVoiceProfile,
         voiceProfileElapsed: _voiceProfileElapsed,
+        recordingVoiceProfileName: _recordingVoiceProfileName,
         speakerEmbeddingReady: check?.isSpeakerEmbeddingReady ?? false,
         activeEngineName: _asrService.activeEngineName,
         liveSegments: _liveSegments,
@@ -1733,7 +1811,9 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         selectedRecordingTitle: _selectedRecording?.title,
         partial: _partial,
         onRecordPressed: _toggleRecording,
-        onVoiceProfileRecordPressed: _toggleVoiceProfileRecording,
+        onVoiceProfileAdd: _addVoiceProfile,
+        onVoiceProfileStopRecording: _stopCurrentVoiceProfileRecording,
+        onVoiceProfileReRecord: _reRecordVoiceProfile,
         onVoiceProfileRename: _renameVoiceProfile,
         onVoiceProfileDelete: _deleteVoiceProfile,
         onRefresh: _prepareModels,
@@ -2569,9 +2649,10 @@ class _ActionCard extends StatelessWidget {
 }
 
 class _VoiceProfileNameDialog extends StatefulWidget {
-  const _VoiceProfileNameDialog({required this.initialName});
+  const _VoiceProfileNameDialog({required this.initialName, this.title});
 
   final String initialName;
+  final String? title;
 
   @override
   State<_VoiceProfileNameDialog> createState() =>
@@ -2597,7 +2678,7 @@ class _VoiceProfileNameDialogState extends State<_VoiceProfileNameDialog> {
   Widget build(BuildContext context) {
     final strings = AppStrings.of(context);
     return AlertDialog(
-      title: Text(strings.renameVoiceProfile),
+      title: Text(widget.title ?? strings.renameVoiceProfile),
       content: TextField(
         controller: _controller,
         autofocus: true,
@@ -2619,57 +2700,60 @@ class _VoiceProfileNameDialogState extends State<_VoiceProfileNameDialog> {
   }
 }
 
-class _VoiceProfileCard extends StatelessWidget {
-  const _VoiceProfileCard({
-    required this.profile,
+class _VoiceLibraryCard extends StatelessWidget {
+  const _VoiceLibraryCard({
+    required this.profiles,
     required this.isRecording,
     required this.isSaving,
     required this.elapsed,
+    required this.recordingName,
     required this.speakerEmbeddingReady,
     required this.canRecord,
-    required this.onRecordPressed,
+    required this.onAddPressed,
+    required this.onStopRecordingPressed,
+    required this.onReRecordPressed,
     required this.onRenamePressed,
     required this.onDeletePressed,
   });
 
-  final VoiceProfile? profile;
+  final List<VoiceProfile> profiles;
   final bool isRecording;
   final bool isSaving;
   final Duration elapsed;
+  final String? recordingName;
   final bool speakerEmbeddingReady;
   final bool canRecord;
-  final VoidCallback onRecordPressed;
-  final VoidCallback onRenamePressed;
-  final VoidCallback onDeletePressed;
+  final VoidCallback onAddPressed;
+  final VoidCallback onStopRecordingPressed;
+  final ValueChanged<VoiceProfile> onReRecordPressed;
+  final ValueChanged<VoiceProfile> onRenamePressed;
+  final ValueChanged<VoiceProfile> onDeletePressed;
 
   @override
   Widget build(BuildContext context) {
     final strings = AppStrings.of(context);
-    final currentProfile = profile;
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
     final canStartRecording = canRecord && speakerEmbeddingReady && !isSaving;
+    final canEditProfiles = canRecord && !isRecording && !isSaving;
     return _ActionCard(
       icon: Icons.fingerprint_rounded,
-      title: strings.myVoiceProfile,
+      title: strings.voiceLibrary,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            currentProfile == null
-                ? strings.voiceProfileMissingHint
-                : strings.voiceProfileReady(
-                    currentProfile.displayName,
-                    _formatShortDuration(
-                      Duration(milliseconds: currentProfile.durationMs),
-                    ),
-                  ),
-            style: Theme.of(context).textTheme.bodyMedium,
+            profiles.isEmpty
+                ? strings.voiceLibraryMissingHint
+                : strings.voiceLibrarySummary(profiles.length),
+            style: textTheme.bodyMedium,
           ),
           if (!speakerEmbeddingReady) ...[
             const SizedBox(height: 8),
             Text(
               strings.speakerModelsUnavailableForAnalysis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              style: textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
               ),
             ),
           ],
@@ -2679,10 +2763,11 @@ class _VoiceProfileCard extends StatelessWidget {
               width: double.infinity,
               height: 46,
               child: FilledButton.icon(
-                onPressed: onRecordPressed,
+                onPressed: onStopRecordingPressed,
                 icon: const Icon(Icons.stop_rounded),
                 label: Text(
                   strings.stopAndSaveVoiceProfile(
+                    recordingName ?? strings.voiceProfileName,
                     _formatShortDuration(elapsed),
                   ),
                 ),
@@ -2697,42 +2782,117 @@ class _VoiceProfileCard extends StatelessWidget {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
                 const SizedBox(width: 10),
-                Text(strings.savingVoiceProfile),
+                Expanded(
+                  child: Text(
+                    strings.savingVoiceProfile(
+                      recordingName ?? strings.voiceProfileName,
+                    ),
+                  ),
+                ),
               ],
             )
-          else if (currentProfile == null)
+          else
             SizedBox(
               width: double.infinity,
               height: 46,
               child: FilledButton.icon(
-                onPressed: canStartRecording ? onRecordPressed : null,
-                icon: const Icon(Icons.mic_rounded),
-                label: Text(strings.recordMyVoice),
+                onPressed: canStartRecording ? onAddPressed : null,
+                icon: const Icon(Icons.person_add_alt_1_rounded),
+                label: Text(strings.addVoiceProfile),
               ),
-            )
-          else
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
+            ),
+          if (profiles.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            for (final profile in profiles)
+              _VoiceProfileRow(
+                profile: profile,
+                canReRecord: canStartRecording,
+                canEdit: canEditProfiles,
+                onReRecordPressed: () => onReRecordPressed(profile),
+                onRenamePressed: () => onRenamePressed(profile),
+                onDeletePressed: () => onDeletePressed(profile),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _VoiceProfileRow extends StatelessWidget {
+  const _VoiceProfileRow({
+    required this.profile,
+    required this.canReRecord,
+    required this.canEdit,
+    required this.onReRecordPressed,
+    required this.onRenamePressed,
+    required this.onDeletePressed,
+  });
+
+  final VoiceProfile profile;
+  final bool canReRecord;
+  final bool canEdit;
+  final VoidCallback onReRecordPressed;
+  final VoidCallback onRenamePressed;
+  final VoidCallback onDeletePressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final strings = AppStrings.of(context);
+    final textTheme = Theme.of(context).textTheme;
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Icon(
+            Icons.account_circle_rounded,
+            size: 26,
+            color: colorScheme.primary,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                OutlinedButton.icon(
-                  onPressed: canStartRecording ? onRecordPressed : null,
-                  icon: const Icon(Icons.mic_rounded),
-                  label: Text(strings.reRecordMyVoice),
+                Text(
+                  profile.displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
-                IconButton.outlined(
-                  tooltip: strings.renameVoiceProfile,
-                  onPressed: onRenamePressed,
-                  icon: const Icon(Icons.edit_rounded),
-                ),
-                IconButton.outlined(
-                  tooltip: strings.deleteVoiceProfile,
-                  onPressed: onDeletePressed,
-                  icon: const Icon(Icons.delete_outline_rounded),
+                Text(
+                  strings.voiceProfileSampleDuration(
+                    _formatShortDuration(
+                      Duration(milliseconds: profile.durationMs),
+                    ),
+                  ),
+                  style: textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
                 ),
               ],
             ),
+          ),
+          IconButton.outlined(
+            tooltip: strings.reRecordVoiceProfile,
+            onPressed: canReRecord ? onReRecordPressed : null,
+            icon: const Icon(Icons.mic_rounded),
+          ),
+          const SizedBox(width: 4),
+          IconButton.outlined(
+            tooltip: strings.renameVoiceProfile,
+            onPressed: canEdit ? onRenamePressed : null,
+            icon: const Icon(Icons.edit_rounded),
+          ),
+          const SizedBox(width: 4),
+          IconButton.outlined(
+            tooltip: strings.deleteVoiceProfile,
+            onPressed: canEdit ? onDeletePressed : null,
+            icon: const Icon(Icons.delete_outline_rounded),
+          ),
         ],
       ),
     );
@@ -2745,10 +2905,11 @@ class _RecordWorkspace extends StatelessWidget {
     required this.tone,
     required this.isRecording,
     required this.isBusy,
-    required this.voiceProfile,
+    required this.voiceProfiles,
     required this.isRecordingVoiceProfile,
     required this.isSavingVoiceProfile,
     required this.voiceProfileElapsed,
+    required this.recordingVoiceProfileName,
     required this.speakerEmbeddingReady,
     required this.activeEngineName,
     required this.liveSegments,
@@ -2756,7 +2917,9 @@ class _RecordWorkspace extends StatelessWidget {
     required this.selectedRecordingTitle,
     required this.partial,
     required this.onRecordPressed,
-    required this.onVoiceProfileRecordPressed,
+    required this.onVoiceProfileAdd,
+    required this.onVoiceProfileStopRecording,
+    required this.onVoiceProfileReRecord,
     required this.onVoiceProfileRename,
     required this.onVoiceProfileDelete,
     required this.onRefresh,
@@ -2767,10 +2930,11 @@ class _RecordWorkspace extends StatelessWidget {
   final _StatusTone tone;
   final bool isRecording;
   final bool isBusy;
-  final VoiceProfile? voiceProfile;
+  final List<VoiceProfile> voiceProfiles;
   final bool isRecordingVoiceProfile;
   final bool isSavingVoiceProfile;
   final Duration voiceProfileElapsed;
+  final String? recordingVoiceProfileName;
   final bool speakerEmbeddingReady;
   final String? activeEngineName;
   final List<AsrSegment> liveSegments;
@@ -2778,9 +2942,11 @@ class _RecordWorkspace extends StatelessWidget {
   final String? selectedRecordingTitle;
   final AsrPartial? partial;
   final VoidCallback onRecordPressed;
-  final VoidCallback onVoiceProfileRecordPressed;
-  final VoidCallback onVoiceProfileRename;
-  final VoidCallback onVoiceProfileDelete;
+  final VoidCallback onVoiceProfileAdd;
+  final VoidCallback onVoiceProfileStopRecording;
+  final ValueChanged<VoiceProfile> onVoiceProfileReRecord;
+  final ValueChanged<VoiceProfile> onVoiceProfileRename;
+  final ValueChanged<VoiceProfile> onVoiceProfileDelete;
   final VoidCallback onRefresh;
   final ValueChanged<RecordingSession> onRecordingTap;
 
@@ -2793,14 +2959,17 @@ class _RecordWorkspace extends StatelessWidget {
       tone: tone,
       onRefresh: onRefresh,
       children: [
-        _VoiceProfileCard(
-          profile: voiceProfile,
+        _VoiceLibraryCard(
+          profiles: voiceProfiles,
           isRecording: isRecordingVoiceProfile,
           isSaving: isSavingVoiceProfile,
           elapsed: voiceProfileElapsed,
+          recordingName: recordingVoiceProfileName,
           speakerEmbeddingReady: speakerEmbeddingReady,
           canRecord: !isRecording && !isBusy,
-          onRecordPressed: onVoiceProfileRecordPressed,
+          onAddPressed: onVoiceProfileAdd,
+          onStopRecordingPressed: onVoiceProfileStopRecording,
+          onReRecordPressed: onVoiceProfileReRecord,
           onRenamePressed: onVoiceProfileRename,
           onDeletePressed: onVoiceProfileDelete,
         ),

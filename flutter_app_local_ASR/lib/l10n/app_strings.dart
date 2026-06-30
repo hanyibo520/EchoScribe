@@ -185,10 +185,22 @@ class AppStrings {
 
   String get useForSummary => isZh ? '用于生成总结' : 'Use for summary';
   String get defaultSelfName => isZh ? '我' : 'Me';
+  String defaultVoiceProfileName(int index) {
+    return isZh ? '说话人$index' : 'Speaker $index';
+  }
+
   String get myVoiceProfile => isZh ? '我的声纹' : 'My voice';
+  String get voiceLibrary => isZh ? '声纹库' : 'Voice library';
   String get voiceProfileMissingHint => isZh
       ? '开始前录制 10-20 秒你的声音，之后会自动区分你和其他人'
       : 'Record 10-20 seconds of your voice before meetings to identify you automatically';
+  String get voiceLibraryMissingHint => isZh
+      ? '添加每个人 10-20 秒的声音样本，录音完成后会自动匹配说话人'
+      : 'Add 10-20 second voice samples for each person to identify speakers after recording';
+  String voiceLibrarySummary(int count) {
+    return isZh ? '已保存 $count 个声纹档案' : '$count voice profiles saved';
+  }
+
   String voiceProfileReady(String name, String duration) {
     return isZh
         ? '已保存：$name · 样本 $duration'
@@ -197,17 +209,28 @@ class AppStrings {
 
   String get recordMyVoice => isZh ? '录制我的声纹' : 'Record my voice';
   String get reRecordMyVoice => isZh ? '重录' : 'Re-record';
-  String stopAndSaveVoiceProfile(String elapsed) {
-    return isZh ? '停止并保存 $elapsed' : 'Stop and save $elapsed';
+  String get addVoiceProfile => isZh ? '添加声纹' : 'Add voice profile';
+  String get reRecordVoiceProfile => isZh ? '重录声纹' : 'Re-record voice';
+  String voiceProfileSampleDuration(String duration) {
+    return isZh ? '样本 $duration' : 'Sample $duration';
   }
 
-  String get recordingVoiceProfile => isZh
-      ? '正在录制我的声纹，请说话 10-20 秒'
-      : 'Recording my voice; speak for 10-20 seconds';
-  String get savingVoiceProfile =>
-      isZh ? '正在保存我的声纹' : 'Saving my voice profile';
+  String stopAndSaveVoiceProfile(String name, String elapsed) {
+    return isZh ? '停止并保存 $name · $elapsed' : 'Stop and save $name · $elapsed';
+  }
+
+  String recordingVoiceProfile(String name) {
+    return isZh
+        ? '正在录制 $name 的声纹，请说话 10-20 秒'
+        : 'Recording $name; speak for 10-20 seconds';
+  }
+
+  String savingVoiceProfile(String name) {
+    return isZh ? '正在保存 $name 的声纹' : 'Saving $name voice profile';
+  }
+
   String voiceProfileSaved(String name) {
-    return isZh ? '我的声纹已保存：$name' : 'My voice profile saved: $name';
+    return isZh ? '声纹已保存：$name' : 'Voice profile saved: $name';
   }
 
   String get voiceProfileNoAudio =>
@@ -224,8 +247,10 @@ class AppStrings {
   }
 
   String get deleteVoiceProfile => isZh ? '删除声纹' : 'Delete voice profile';
-  String get voiceProfileDeleted =>
-      isZh ? '我的声纹已删除' : 'My voice profile was deleted';
+  String voiceProfileDeleted(String name) {
+    return isZh ? '声纹已删除：$name' : 'Voice profile deleted: $name';
+  }
+
   String get analyzeSpeakers => isZh ? '分析说话人' : 'Analyze speakers';
   String get analyzingSpeakers => isZh ? '正在分析说话人' : 'Analyzing speakers';
   String get speakerAnalysis => isZh ? '说话人分析' : 'Speaker analysis';
@@ -249,9 +274,10 @@ class AppStrings {
   }
 
   String get selfSpeakerBadge => isZh ? '我' : 'Me';
-  String get speakerAutoAnalysisSkippedNoVoiceProfile => isZh
-      ? '录音已保存；尚未录制“我的声纹”，已跳过自动说话人识别'
-      : 'Recording saved; no voice profile yet, so speaker identification was skipped';
+  String get speakerMatchedBadge => isZh ? '已识别' : 'Identified';
+  String get speakerAutoAnalysisSkippedNoVoiceProfiles => isZh
+      ? '录音已保存；声纹库为空，已跳过自动说话人识别'
+      : 'Recording saved; the voice library is empty, so speaker identification was skipped';
   String get speakerAutoAnalysisSkippedNoAudio => isZh
       ? '录音已保存；缺少原始音频，已跳过自动说话人识别'
       : 'Recording saved; original audio is missing, so speaker identification was skipped';
