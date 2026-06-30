@@ -25,6 +25,7 @@ class RecordingDetailPage extends StatefulWidget {
 
 class _RecordingDetailPageState extends State<RecordingDetailPage> {
   List<SpeakerTurn> _speakerTurns = const <SpeakerTurn>[];
+  List<SpeakerProfileMatch> _speakerMatches = const <SpeakerProfileMatch>[];
   bool _isLoadingSpeakerTurns = true;
   bool _isAnalyzingSpeakers = false;
   String? _speakerError;
@@ -52,11 +53,14 @@ class _RecordingDetailPageState extends State<RecordingDetailPage> {
       final turns = await RecordingDatabase.instance.listSpeakerTurns(
         widget.session.id,
       );
+      final matches = await RecordingDatabase.instance
+          .listSpeakerProfileMatches(widget.session.id);
       if (!mounted) {
         return;
       }
       setState(() {
         _speakerTurns = turns;
+        _speakerMatches = matches;
         _isLoadingSpeakerTurns = false;
       });
     } catch (error) {
@@ -74,6 +78,7 @@ class _RecordingDetailPageState extends State<RecordingDetailPage> {
     final onAnalyzeSpeakers = widget.onAnalyzeSpeakers;
     if (onAnalyzeSpeakers == null ||
         _isAnalyzingSpeakers ||
+        !widget.speakerModelsReady ||
         !widget.session.hasAudio) {
       return;
     }
@@ -136,6 +141,7 @@ class _RecordingDetailPageState extends State<RecordingDetailPage> {
           const SizedBox(height: 14),
           _SpeakerTimelinePanel(
             turns: _speakerTurns,
+            matches: _speakerMatches,
             isLoading: _isLoadingSpeakerTurns,
           ),
           const SizedBox(height: 18),
@@ -236,9 +242,14 @@ class _SpeakerAnalysisAction extends StatelessWidget {
 }
 
 class _SpeakerTimelinePanel extends StatelessWidget {
-  const _SpeakerTimelinePanel({required this.turns, required this.isLoading});
+  const _SpeakerTimelinePanel({
+    required this.turns,
+    required this.matches,
+    required this.isLoading,
+  });
 
   final List<SpeakerTurn> turns;
+  final List<SpeakerProfileMatch> matches;
   final bool isLoading;
 
   @override
@@ -246,6 +257,9 @@ class _SpeakerTimelinePanel extends StatelessWidget {
     final strings = AppStrings.of(context);
     final textTheme = Theme.of(context).textTheme;
     final speakerCount = turns.map((turn) => turn.speakerLabel).toSet().length;
+    final matchesBySpeaker = {
+      for (final match in matches) match.speakerLabel: match,
+    };
 
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -299,7 +313,10 @@ class _SpeakerTimelinePanel extends StatelessWidget {
               for (final turn in turns)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
-                  child: _SpeakerTurnRow(turn: turn),
+                  child: _SpeakerTurnRow(
+                    turn: turn,
+                    match: matchesBySpeaker[turn.speakerLabel],
+                  ),
                 ),
           ],
         ),
@@ -309,12 +326,15 @@ class _SpeakerTimelinePanel extends StatelessWidget {
 }
 
 class _SpeakerTurnRow extends StatelessWidget {
-  const _SpeakerTurnRow({required this.turn});
+  const _SpeakerTurnRow({required this.turn, required this.match});
 
   final SpeakerTurn turn;
+  final SpeakerProfileMatch? match;
 
   @override
   Widget build(BuildContext context) {
+    final speakerMatch = match;
+    final label = speakerMatch?.displayLabel ?? turn.speakerLabel;
     return Row(
       children: [
         Icon(
@@ -324,13 +344,49 @@ class _SpeakerTurnRow extends StatelessWidget {
         ),
         const SizedBox(width: 8),
         Expanded(
-          child: Text(
-            '${turn.speakerLabel} · '
-            '${_formatDuration(turn.startMs)} - ${_formatDuration(turn.endMs)}',
-            style: Theme.of(context).textTheme.bodyMedium,
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                '$label · '
+                '${_formatDuration(turn.startMs)} - ${_formatDuration(turn.endMs)}',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              if (speakerMatch?.isSelfMatch ?? false)
+                _SelfBadge(label: AppStrings.of(context).selfSpeakerBadge),
+            ],
           ),
         ),
       ],
+    );
+  }
+}
+
+class _SelfBadge extends StatelessWidget {
+  const _SelfBadge({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: colorScheme.primaryContainer,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        child: Text(
+          label,
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+            color: colorScheme.onPrimaryContainer,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
     );
   }
 }

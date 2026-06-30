@@ -23,6 +23,8 @@ class AppStrings {
   String get summaryTab => isZh ? '总结' : 'Summary';
   String get modelsTab => isZh ? '模型' : 'Models';
   String get refresh => isZh ? '刷新' : 'Refresh';
+  String get cancel => isZh ? '取消' : 'Cancel';
+  String get save => isZh ? '保存' : 'Save';
   String get checkingLocalModels =>
       isZh ? '正在检查本地模型...' : 'Checking local models...';
   String get primaryAsrReady => isZh
@@ -182,6 +184,48 @@ class AppStrings {
   }
 
   String get useForSummary => isZh ? '用于生成总结' : 'Use for summary';
+  String get defaultSelfName => isZh ? '我' : 'Me';
+  String get myVoiceProfile => isZh ? '我的声纹' : 'My voice';
+  String get voiceProfileMissingHint => isZh
+      ? '开始前录制 10-20 秒你的声音，之后会自动区分你和其他人'
+      : 'Record 10-20 seconds of your voice before meetings to identify you automatically';
+  String voiceProfileReady(String name, String duration) {
+    return isZh
+        ? '已保存：$name · 样本 $duration'
+        : 'Saved: $name · sample $duration';
+  }
+
+  String get recordMyVoice => isZh ? '录制我的声纹' : 'Record my voice';
+  String get reRecordMyVoice => isZh ? '重录' : 'Re-record';
+  String stopAndSaveVoiceProfile(String elapsed) {
+    return isZh ? '停止并保存 $elapsed' : 'Stop and save $elapsed';
+  }
+
+  String get recordingVoiceProfile => isZh
+      ? '正在录制我的声纹，请说话 10-20 秒'
+      : 'Recording my voice; speak for 10-20 seconds';
+  String get savingVoiceProfile =>
+      isZh ? '正在保存我的声纹' : 'Saving my voice profile';
+  String voiceProfileSaved(String name) {
+    return isZh ? '我的声纹已保存：$name' : 'My voice profile saved: $name';
+  }
+
+  String get voiceProfileNoAudio =>
+      isZh ? '没有录到声纹音频，请重录' : 'No voice audio was recorded; try again';
+  String get voiceProfileTooShort => isZh
+      ? '声纹样本太短，请至少录制 10 秒'
+      : 'Voice sample is too short; record at least 10 seconds';
+  String get voiceProfileEmbeddingEmpty =>
+      isZh ? '声纹向量生成失败，请重录' : 'Voice embedding failed; try recording again';
+  String get renameVoiceProfile => isZh ? '修改声纹名称' : 'Rename voice profile';
+  String get voiceProfileName => isZh ? '声纹名称' : 'Voice profile name';
+  String voiceProfileRenamed(String name) {
+    return isZh ? '声纹名称已更新：$name' : 'Voice profile renamed: $name';
+  }
+
+  String get deleteVoiceProfile => isZh ? '删除声纹' : 'Delete voice profile';
+  String get voiceProfileDeleted =>
+      isZh ? '我的声纹已删除' : 'My voice profile was deleted';
   String get analyzeSpeakers => isZh ? '分析说话人' : 'Analyze speakers';
   String get analyzingSpeakers => isZh ? '正在分析说话人' : 'Analyzing speakers';
   String get speakerAnalysis => isZh ? '说话人分析' : 'Speaker analysis';
@@ -198,6 +242,28 @@ class AppStrings {
   String get noSpeakerTurns => isZh ? '暂无说话人时间线' : 'No speaker timeline yet';
   String speakerAnalysisFailed(String error) {
     return isZh ? '说话人分析失败：$error' : 'Speaker analysis failed: $error';
+  }
+
+  String otherSpeakerLabel(String speakerLabel) {
+    return isZh ? '其他人（$speakerLabel）' : 'Other ($speakerLabel)';
+  }
+
+  String get selfSpeakerBadge => isZh ? '我' : 'Me';
+  String get speakerAutoAnalysisSkippedNoVoiceProfile => isZh
+      ? '录音已保存；尚未录制“我的声纹”，已跳过自动说话人识别'
+      : 'Recording saved; no voice profile yet, so speaker identification was skipped';
+  String get speakerAutoAnalysisSkippedNoAudio => isZh
+      ? '录音已保存；缺少原始音频，已跳过自动说话人识别'
+      : 'Recording saved; original audio is missing, so speaker identification was skipped';
+  String get speakerAutoAnalysisSkippedNoModels => isZh
+      ? '录音已保存；人声分离或声纹模型未就绪，已跳过自动说话人识别'
+      : 'Recording saved; speaker models are not ready, so speaker identification was skipped';
+  String get speakerAutoAnalysisReady =>
+      isZh ? '说话人识别已完成' : 'Speaker identification complete';
+  String speakerAutoAnalysisFailed(Object error) {
+    return isZh
+        ? '自动说话人识别失败：$error'
+        : 'Automatic speaker identification failed: $error';
   }
 
   String get selectedForSummary => isZh ? '已选为当前总结来源' : 'Selected for summary';

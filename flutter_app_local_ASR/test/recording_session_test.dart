@@ -44,4 +44,32 @@ void main() {
     expect(turn.toMap()['speaker_label'], 'Speaker 1');
     expect(embedding.dimension, 3);
   });
+
+  test('voice profile and speaker match records carry identity metadata', () {
+    final profile = VoiceProfile(
+      id: 9,
+      displayName: 'Alice',
+      embedding: Float32List.fromList(<double>[0.4, 0.5]),
+      sampleAudioPath: '/tmp/alice.wav',
+      sampleRate: 16000,
+      durationMs: 12000,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(1),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(2),
+    );
+    final match = SpeakerProfileMatch.fromMap(<String, Object?>{
+      'id': 4,
+      'recording_id': 3,
+      'speaker_label': 'Speaker 1',
+      'matched_profile_id': 9,
+      'display_label': 'Alice',
+      'is_self_match': 1,
+      'threshold': 0.6,
+    });
+
+    expect(profile.dimension, 2);
+    expect(profile.isActive, isTrue);
+    expect(match.displayLabel, 'Alice');
+    expect(match.isSelfMatch, isTrue);
+    expect(match.threshold, 0.6);
+  });
 }

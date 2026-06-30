@@ -12,6 +12,7 @@ class SherpaSpeakerService {
     : _modelStore = modelStore;
 
   static const int sampleRate = 16000;
+  static const double defaultSpeakerMatchThreshold = 0.6;
   static const int _numThreads = 2;
 
   final ModelStore _modelStore;
@@ -91,6 +92,33 @@ class SherpaSpeakerService {
       () => _computeEmbeddingFromPcm16Audio(
         pcm16Audio: pcm16Audio,
         embeddingModelPath: check.speakerEmbeddingFiles.model,
+      ),
+    );
+  }
+
+  Future<String> searchSpeakerEmbedding({
+    required Float32List embedding,
+    required Map<String, Float32List> referenceEmbeddings,
+    double threshold = defaultSpeakerMatchThreshold,
+  }) async {
+    if (embedding.isEmpty || referenceEmbeddings.isEmpty) {
+      return '';
+    }
+
+    final dimension = embedding.length;
+    final compatibleReferences = <String, Float32List>{
+      for (final entry in referenceEmbeddings.entries)
+        if (entry.value.length == dimension) entry.key: entry.value,
+    };
+    if (compatibleReferences.isEmpty) {
+      return '';
+    }
+
+    return Isolate.run(
+      () => _searchSpeakerEmbedding(
+        embedding: embedding,
+        referenceEmbeddings: compatibleReferences,
+        threshold: threshold,
       ),
     );
   }
@@ -217,5 +245,22 @@ SpeakerEmbeddingVector _computeEmbeddingFromPcm16Audio({
   } finally {
     stream.free();
     extractor.free();
+  }
+}
+
+String _searchSpeakerEmbedding({
+  required Float32List embedding,
+  required Map<String, Float32List> referenceEmbeddings,
+  required double threshold,
+}) {
+  sherpa.initBindings();
+  final manager = sherpa.SpeakerEmbeddingManager(embedding.length);
+  try {
+    for (final entry in referenceEmbeddings.entries) {
+      manager.add(name: entry.key, embedding: entry.value);
+    }
+    return manager.search(embedding: embedding, threshold: threshold);
+  } finally {
+    manager.free();
   }
 }

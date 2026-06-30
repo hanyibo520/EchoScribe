@@ -179,3 +179,61 @@ class SpeakerEmbeddingRecord {
 
   int get dimension => embedding.length;
 }
+
+class VoiceProfile {
+  const VoiceProfile({
+    this.id,
+    required this.displayName,
+    required this.embedding,
+    required this.sampleAudioPath,
+    required this.sampleRate,
+    required this.durationMs,
+    required this.createdAt,
+    required this.updatedAt,
+    this.isActive = true,
+  });
+
+  final int? id;
+  final String displayName;
+  final Float32List embedding;
+  final String sampleAudioPath;
+  final int sampleRate;
+  final int durationMs;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final bool isActive;
+
+  int get dimension => embedding.length;
+}
+
+class SpeakerProfileMatch {
+  const SpeakerProfileMatch({
+    this.id,
+    required this.recordingId,
+    required this.speakerLabel,
+    required this.matchedProfileId,
+    required this.displayLabel,
+    required this.isSelfMatch,
+    required this.threshold,
+  });
+
+  final int? id;
+  final int recordingId;
+  final String speakerLabel;
+  final int? matchedProfileId;
+  final String displayLabel;
+  final bool isSelfMatch;
+  final double threshold;
+
+  factory SpeakerProfileMatch.fromMap(Map<String, Object?> map) {
+    return SpeakerProfileMatch(
+      id: map['id'] as int?,
+      recordingId: map['recording_id']! as int,
+      speakerLabel: map['speaker_label']! as String,
+      matchedProfileId: map['matched_profile_id'] as int?,
+      displayLabel: map['display_label']! as String,
+      isSelfMatch: (map['is_self_match']! as int) == 1,
+      threshold: (map['threshold']! as num).toDouble(),
+    );
+  }
+}

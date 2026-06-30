@@ -31,11 +31,12 @@ class RecordingDatabase {
     final dbPath = p.join(basePath, 'local_meeting_asr.db');
     return openDatabase(
       dbPath,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await _createRecordingTables(db);
         await _createSummaryTable(db);
         await _createSpeakerTables(db);
+        await _createVoiceProfileTables(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -45,11 +46,15 @@ class RecordingDatabase {
           await _ensureRecordingAudioColumns(db);
           await _createSpeakerTables(db);
         }
+        if (oldVersion < 4) {
+          await _createVoiceProfileTables(db);
+        }
       },
       onOpen: (db) async {
         await _ensureRecordingAudioColumns(db);
         await _createSummaryTable(db);
         await _createSpeakerTables(db);
+        await _createVoiceProfileTables(db);
       },
     );
   }
@@ -137,6 +142,44 @@ class RecordingDatabase {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_speaker_embeddings_recording_id '
       'ON speaker_embeddings(recording_id)',
+    );
+  }
+
+  Future<void> _createVoiceProfileTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS voice_profiles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        display_name TEXT NOT NULL,
+        embedding BLOB NOT NULL,
+        dimension INTEGER NOT NULL,
+        sample_audio_path TEXT NOT NULL,
+        sample_rate INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_voice_profiles_active '
+      'ON voice_profiles(is_active)',
+    );
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS speaker_profile_matches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recording_id INTEGER NOT NULL,
+        speaker_label TEXT NOT NULL,
+        matched_profile_id INTEGER,
+        display_label TEXT NOT NULL,
+        is_self_match INTEGER NOT NULL,
+        threshold REAL NOT NULL,
+        FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+        FOREIGN KEY (matched_profile_id) REFERENCES voice_profiles(id) ON DELETE SET NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_speaker_profile_matches_recording_id '
+      'ON speaker_profile_matches(recording_id)',
     );
   }
 
@@ -314,6 +357,7 @@ class RecordingDatabase {
     required int recordingId,
     required List<SpeakerTurn> turns,
     required List<SpeakerEmbeddingRecord> embeddings,
+    List<SpeakerProfileMatch> matches = const <SpeakerProfileMatch>[],
   }) async {
     final db = await database;
     await db.transaction((txn) async {
@@ -324,6 +368,11 @@ class RecordingDatabase {
       );
       await txn.delete(
         'speaker_embeddings',
+        where: 'recording_id = ?',
+        whereArgs: [recordingId],
+      );
+      await txn.delete(
+        'speaker_profile_matches',
         where: 'recording_id = ?',
         whereArgs: [recordingId],
       );
@@ -344,7 +393,148 @@ class RecordingDatabase {
           'dimension': embedding.dimension,
         });
       }
+      for (final match in matches) {
+        await txn.insert('speaker_profile_matches', {
+          'recording_id': recordingId,
+          'speaker_label': match.speakerLabel,
+          'matched_profile_id': match.matchedProfileId,
+          'display_label': match.displayLabel,
+          'is_self_match': match.isSelfMatch ? 1 : 0,
+          'threshold': match.threshold,
+        });
+      }
     });
+  }
+
+  Future<List<SpeakerProfileMatch>> listSpeakerProfileMatches(
+    int recordingId,
+  ) async {
+    final db = await database;
+    final rows = await db.query(
+      'speaker_profile_matches',
+      where: 'recording_id = ?',
+      whereArgs: [recordingId],
+      orderBy: 'speaker_label ASC',
+    );
+    return rows.map(SpeakerProfileMatch.fromMap).toList();
+  }
+
+  Future<VoiceProfile?> getActiveVoiceProfile() async {
+    final db = await database;
+    final rows = await db.query(
+      'voice_profiles',
+      where: 'is_active = ?',
+      whereArgs: [1],
+      orderBy: 'updated_at DESC',
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return null;
+    }
+    return _voiceProfileFromMap(rows.first);
+  }
+
+  Future<VoiceProfile> saveSelfVoiceProfile({
+    required String displayName,
+    required Float32List embedding,
+    required String sampleAudioPath,
+    required int sampleRate,
+    required int durationMs,
+  }) async {
+    final db = await database;
+    final now = DateTime.now();
+    final existing = await getActiveVoiceProfile();
+    final trimmedName = displayName.trim().isEmpty ? '我' : displayName.trim();
+
+    if (existing == null) {
+      final id = await db.insert('voice_profiles', {
+        'display_name': trimmedName,
+        'embedding': _float32ToBytes(embedding),
+        'dimension': embedding.length,
+        'sample_audio_path': sampleAudioPath,
+        'sample_rate': sampleRate,
+        'duration_ms': durationMs,
+        'is_active': 1,
+        'created_at': now.millisecondsSinceEpoch,
+        'updated_at': now.millisecondsSinceEpoch,
+      });
+      return VoiceProfile(
+        id: id,
+        displayName: trimmedName,
+        embedding: embedding,
+        sampleAudioPath: sampleAudioPath,
+        sampleRate: sampleRate,
+        durationMs: durationMs,
+        createdAt: now,
+        updatedAt: now,
+      );
+    }
+
+    await db.update(
+      'voice_profiles',
+      {
+        'display_name': trimmedName,
+        'embedding': _float32ToBytes(embedding),
+        'dimension': embedding.length,
+        'sample_audio_path': sampleAudioPath,
+        'sample_rate': sampleRate,
+        'duration_ms': durationMs,
+        'is_active': 1,
+        'updated_at': now.millisecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: [existing.id],
+    );
+    return VoiceProfile(
+      id: existing.id,
+      displayName: trimmedName,
+      embedding: embedding,
+      sampleAudioPath: sampleAudioPath,
+      sampleRate: sampleRate,
+      durationMs: durationMs,
+      createdAt: existing.createdAt,
+      updatedAt: now,
+    );
+  }
+
+  Future<VoiceProfile?> updateActiveVoiceProfileName(String displayName) async {
+    final existing = await getActiveVoiceProfile();
+    if (existing == null) {
+      return null;
+    }
+    final db = await database;
+    final now = DateTime.now();
+    final trimmedName = displayName.trim().isEmpty ? '我' : displayName.trim();
+    await db.update(
+      'voice_profiles',
+      {'display_name': trimmedName, 'updated_at': now.millisecondsSinceEpoch},
+      where: 'id = ?',
+      whereArgs: [existing.id],
+    );
+    return VoiceProfile(
+      id: existing.id,
+      displayName: trimmedName,
+      embedding: existing.embedding,
+      sampleAudioPath: existing.sampleAudioPath,
+      sampleRate: existing.sampleRate,
+      durationMs: existing.durationMs,
+      createdAt: existing.createdAt,
+      updatedAt: now,
+    );
+  }
+
+  Future<VoiceProfile?> deleteActiveVoiceProfile() async {
+    final existing = await getActiveVoiceProfile();
+    if (existing == null) {
+      return null;
+    }
+    final db = await database;
+    await db.delete(
+      'voice_profiles',
+      where: 'id = ?',
+      whereArgs: [existing.id],
+    );
+    return existing;
   }
 
   Future<String> nextSummaryTitle({required bool isZh}) async {
@@ -424,5 +614,19 @@ class RecordingDatabase {
   Float32List _bytesToFloat32(Uint8List bytes) {
     final copy = Uint8List.fromList(bytes);
     return Float32List.view(copy.buffer, 0, copy.lengthInBytes ~/ 4);
+  }
+
+  VoiceProfile _voiceProfileFromMap(Map<String, Object?> row) {
+    return VoiceProfile(
+      id: row['id'] as int?,
+      displayName: row['display_name']! as String,
+      embedding: _bytesToFloat32(row['embedding']! as Uint8List),
+      sampleAudioPath: row['sample_audio_path']! as String,
+      sampleRate: row['sample_rate']! as int,
+      durationMs: row['duration_ms']! as int,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(row['created_at']! as int),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(row['updated_at']! as int),
+      isActive: (row['is_active']! as int) == 1,
+    );
   }
 }
