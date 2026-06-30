@@ -76,6 +76,8 @@ flutter:
     - assets/models/asr/sensevoice_fast/
     - assets/models/asr/moonshine_tiny_streaming_en/
     - assets/models/asr/whisper/ggml-base.bin
+    - assets/models/speaker/diarization/pyannote_segmentation_3_0/
+    - assets/models/speaker/embedding/3dspeaker_zh_cn_16k/
     - assets/models/llm/qwen3-0.6b-q4.gguf
     - assets/templates/
 

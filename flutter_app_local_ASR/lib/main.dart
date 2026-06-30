@@ -580,6 +580,80 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     }
   }
 
+  Future<void> _installSpeakerModels() async {
+    if (_isInstallingModels) {
+      return;
+    }
+
+    setState(() {
+      _isInstallingModels = true;
+      _status = _StatusMessage((strings) => strings.installingSpeakerModels);
+    });
+
+    try {
+      await _modelStore.installBundledModels(
+        scope: ModelInstallScope.speakerProcessing,
+        onProgress: (progress) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _status = _StatusMessage(
+              (strings) => strings.installingBundledModel(
+                progress.label,
+                _formatInstallProgress(progress),
+              ),
+            );
+          });
+        },
+      );
+      final result = await _modelStore.inspect();
+      final bridgeReport = await _inspectNativeBridges(result);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _modelCheck = result;
+        _nativeBridgeReport = bridgeReport;
+        _isInstallingModels = false;
+        _status = _StatusMessage(
+          (strings) => result.isSherpaSpeakerProcessingReady
+              ? strings.speakerModelsReady
+              : strings.speakerModelsMissing,
+          tone: result.isSherpaSpeakerProcessingReady
+              ? _StatusTone.success
+              : _StatusTone.info,
+        );
+      });
+    } on MissingBundledModelsException catch (error) {
+      final result = await _modelStore.inspect();
+      final bridgeReport = await _inspectNativeBridges(result);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _modelCheck = result;
+        _nativeBridgeReport = bridgeReport;
+        _isInstallingModels = false;
+        _status = _StatusMessage(
+          (strings) => strings.bundledModelsMissing(error.missingAssets.length),
+          tone: _StatusTone.error,
+        );
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isInstallingModels = false;
+        _status = _StatusMessage(
+          (strings) => strings.installModelsFailed(error),
+          tone: _StatusTone.error,
+        );
+      });
+    }
+  }
+
   List<AsrSegment> _buildSegmentsToPersist() {
     final segments = List<AsrSegment>.from(_liveSegments)
       ..sort((a, b) => a.index.compareTo(b.index));
@@ -1123,6 +1197,9 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         canChangePrimaryAsrModel:
             !_isRecording && !_isStoppingRecording && !_isImportingAudio,
         onPrimaryAsrModelChanged: _onPrimaryAsrModelChanged,
+        canInstallSpeakerModels:
+            !_isRecording && !_isStoppingRecording && !_isImportingAudio,
+        onInstallSpeakerModels: _installSpeakerModels,
         onRefresh: _prepareModels,
       ),
       _RecordWorkspace(
@@ -1351,6 +1428,8 @@ class _StatusPanel extends StatelessWidget {
     required this.selectedPrimaryAsrModel,
     required this.canChangePrimaryAsrModel,
     required this.onPrimaryAsrModelChanged,
+    required this.canInstallSpeakerModels,
+    required this.onInstallSpeakerModels,
   });
 
   final String status;
@@ -1361,6 +1440,8 @@ class _StatusPanel extends StatelessWidget {
   final _PrimaryAsrModel selectedPrimaryAsrModel;
   final bool canChangePrimaryAsrModel;
   final ValueChanged<_PrimaryAsrModel> onPrimaryAsrModelChanged;
+  final bool canInstallSpeakerModels;
+  final VoidCallback onInstallSpeakerModels;
 
   @override
   Widget build(BuildContext context) {
@@ -1427,6 +1508,45 @@ class _StatusPanel extends StatelessWidget {
                 ok: check.isSenseVoiceReady,
               ),
               _ModelStatusRow(
+                label: strings.sherpaSpeakerDiarization,
+                value: check.isSpeakerDiarizationReady
+                    ? strings.ready
+                    : strings.missingFiles(
+                        check.missingSpeakerDiarizationFiles.length,
+                      ),
+                ok: check.isSpeakerDiarizationReady,
+              ),
+              _ModelStatusRow(
+                label: strings.sherpaSpeakerEmbedding,
+                value: check.isSpeakerEmbeddingReady
+                    ? strings.ready
+                    : strings.missingFiles(
+                        check.missingSpeakerEmbeddingFiles.length,
+                      ),
+                ok: check.isSpeakerEmbeddingReady,
+              ),
+              if (!check.isSherpaSpeakerProcessingReady) ...[
+                const SizedBox(height: 4),
+                SizedBox(
+                  width: double.infinity,
+                  height: 46,
+                  child: OutlinedButton.icon(
+                    onPressed: canInstallSpeakerModels && !isInstallingModels
+                        ? onInstallSpeakerModels
+                        : null,
+                    icon: isInstallingModels
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.group_add_rounded),
+                    label: Text(strings.addSpeakerModels),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              _ModelStatusRow(
                 label: strings.whisperCpp,
                 value: _bridgeValue(
                   strings,
@@ -1475,7 +1595,19 @@ class _StatusPanel extends StatelessWidget {
                       _PathLine(strings.missing, file),
                     for (final file in check.missingSenseVoiceFiles)
                       _PathLine(strings.missing, file),
+                    for (final file in check.missingSpeakerDiarizationFiles)
+                      _PathLine(strings.missing, file),
+                    for (final file in check.missingSpeakerEmbeddingFiles)
+                      _PathLine(strings.missing, file),
                     _PathLine(strings.whisper, check.whisperModelPath),
+                    _PathLine(
+                      strings.speakerDiarizationModel,
+                      check.speakerDiarizationFiles.segmentation,
+                    ),
+                    _PathLine(
+                      strings.speakerEmbeddingModel,
+                      check.speakerEmbeddingFiles.model,
+                    ),
                     _PathLine(strings.qwenGguf, check.llamaModelPath),
                   ],
                 ),
@@ -2153,6 +2285,8 @@ class _ModelWorkspace extends StatelessWidget {
     required this.selectedPrimaryAsrModel,
     required this.canChangePrimaryAsrModel,
     required this.onPrimaryAsrModelChanged,
+    required this.canInstallSpeakerModels,
+    required this.onInstallSpeakerModels,
     required this.onRefresh,
   });
 
@@ -2164,6 +2298,8 @@ class _ModelWorkspace extends StatelessWidget {
   final _PrimaryAsrModel selectedPrimaryAsrModel;
   final bool canChangePrimaryAsrModel;
   final ValueChanged<_PrimaryAsrModel> onPrimaryAsrModelChanged;
+  final bool canInstallSpeakerModels;
+  final VoidCallback onInstallSpeakerModels;
   final VoidCallback onRefresh;
 
   @override
@@ -2184,6 +2320,8 @@ class _ModelWorkspace extends StatelessWidget {
           selectedPrimaryAsrModel: selectedPrimaryAsrModel,
           canChangePrimaryAsrModel: canChangePrimaryAsrModel,
           onPrimaryAsrModelChanged: onPrimaryAsrModelChanged,
+          canInstallSpeakerModels: canInstallSpeakerModels,
+          onInstallSpeakerModels: onInstallSpeakerModels,
         ),
       ],
     );

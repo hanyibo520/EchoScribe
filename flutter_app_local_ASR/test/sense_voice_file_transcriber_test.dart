@@ -86,6 +86,27 @@ void main() {
     expect(check.fastSenseVoiceFiles.model, 'fast-model');
   });
 
+  test(
+    'Sherpa speaker processing requires diarization and embedding models',
+    () {
+      expect(_modelCheck().isSherpaSpeakerProcessingReady, isTrue);
+      expect(
+        _modelCheck(
+          missingSpeakerDiarizationFiles: const <String>[
+            'speaker-segmentation',
+          ],
+        ).isSherpaSpeakerProcessingReady,
+        isFalse,
+      );
+      expect(
+        _modelCheck(
+          missingSpeakerEmbeddingFiles: const <String>['speaker-embedding'],
+        ).isSherpaSpeakerProcessingReady,
+        isFalse,
+      );
+    },
+  );
+
   test('live ASR can use Moonshine or SenseVoice as primary fallback', () {
     expect(_modelCheck().isLiveAsrReady, isTrue);
     expect(
@@ -507,6 +528,8 @@ ModelCheckResult _modelCheck({
   List<String> missingSenseVoiceFiles = const <String>[],
   List<String> missingFastSenseVoiceFiles = const <String>[],
   List<String> missingMoonshineTinyStreamingFiles = const <String>[],
+  List<String> missingSpeakerDiarizationFiles = const <String>[],
+  List<String> missingSpeakerEmbeddingFiles = const <String>[],
 }) {
   return ModelCheckResult(
     asrRootPath: 'asr-root',
@@ -536,6 +559,15 @@ ModelCheckResult _modelCheck({
       },
     ),
     missingMoonshineTinyStreamingFiles: missingMoonshineTinyStreamingFiles,
+    speakerDiarizationFiles: const SpeakerDiarizationModelFiles(
+      segmentation: 'speaker-segmentation',
+      embedding: 'speaker-embedding',
+    ),
+    missingSpeakerDiarizationFiles: missingSpeakerDiarizationFiles,
+    speakerEmbeddingFiles: const SpeakerEmbeddingModelFiles(
+      model: 'speaker-embedding',
+    ),
+    missingSpeakerEmbeddingFiles: missingSpeakerEmbeddingFiles,
     whisperModelPath: 'whisper',
     isWhisperModelReady: true,
     llamaModelPath: 'llama',

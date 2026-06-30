@@ -102,6 +102,28 @@ fast 模型文件：
 - 速度不一定优于 Moonshine，但结果完整性更可控。
 - 适合准确率和中文内容完整度优先的场景。
 
+## Sherpa-ONNX Speaker Processing
+
+定位：在 ASR 之外补充人声分离与声纹向量能力。
+
+当前接入状态：
+
+- 人声分离服务：`SherpaSpeakerService.diarizePcm16Audio`
+- 声纹向量服务：`SherpaSpeakerService.computeEmbeddingFromPcm16Audio`
+- 首页/模型中心：已显示人声分离与声纹 embedding 状态，并支持添加打包模型
+- 输入音频：`16k mono PCM16`
+
+模型文件：
+
+- `assets/models/speaker/diarization/pyannote_segmentation_3_0/model.onnx`
+- `assets/models/speaker/embedding/3dspeaker_zh_cn_16k/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`
+
+说明：
+
+- diarization 会输出 `speaker + start/end seconds`，用于判断谁在什么时候说话。
+- speaker embedding 会输出 `Float32List` 向量，用于后续身份匹配或验证。
+- 目前首页只负责模型状态与安装入口，录音/导入转写仍保持原 ASR 流程。
+
 ## 选择建议
 
 推荐默认策略：
@@ -123,4 +145,3 @@ flutter: [ASR timing] import engine=SenseVoice ...
 - `engine=Moonshine`：当前导入走 Moonshine。
 - `engine=SenseVoice`：当前导入走 Sherpa/SenseVoice。
 - `segments` 和 `chars` 明显偏低时，即使耗时很短，也视为结果不合格。
-

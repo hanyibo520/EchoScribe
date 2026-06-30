@@ -8,6 +8,9 @@ enum ModelInstallScope {
   primaryAsr,
   moonshineAsr,
   fastAsr,
+  speakerDiarization,
+  speakerEmbedding,
+  speakerProcessing,
   detailedSummary,
   offlineTranscription,
   all,
@@ -22,6 +25,9 @@ class ModelStore {
   static const String senseVoiceModelFile = 'model.int8.onnx';
   static const String senseVoiceTokensFile = 'tokens.txt';
   static const String sileroVadFile = 'silero_vad.onnx';
+  static const String speakerSegmentationModelFile = 'model.onnx';
+  static const String speakerEmbeddingModelFile =
+      '3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx';
   static const List<String> moonshineTinyStreamingFiles = <String>[
     'adapter.ort',
     'cross_kv.ort',
@@ -42,6 +48,8 @@ class ModelStore {
   static const int _moonshineModelMinBytes = 1024;
   static const int _moonshineTokenizerMinBytes = 1024;
   static const int _moonshineConfigMinBytes = 64;
+  static const int _speakerSegmentationModelMinBytes = 1024 * 1024;
+  static const int _speakerEmbeddingModelMinBytes = 1024 * 1024;
   static const int _whisperModelMinBytes = 120 * 1024 * 1024;
   static const int _qwenGgufModelMinBytes = 350 * 1024 * 1024;
 
@@ -96,6 +104,29 @@ class ModelStore {
       ),
       files: moonshineFilePaths,
     );
+    final speakerEmbeddingFiles = SpeakerEmbeddingModelFiles(
+      model: await _runtimeModelPath(
+        assetDirectory:
+            '$bundledModelAssetRoot/speaker/embedding/3dspeaker_zh_cn_16k',
+        fileName: speakerEmbeddingModelFile,
+        installedPath: p.join(
+          paths.speakerEmbeddingRoot,
+          speakerEmbeddingModelFile,
+        ),
+      ),
+    );
+    final speakerDiarizationFiles = SpeakerDiarizationModelFiles(
+      segmentation: await _runtimeModelPath(
+        assetDirectory:
+            '$bundledModelAssetRoot/speaker/diarization/pyannote_segmentation_3_0',
+        fileName: speakerSegmentationModelFile,
+        installedPath: p.join(
+          paths.speakerDiarizationRoot,
+          speakerSegmentationModelFile,
+        ),
+      ),
+      embedding: speakerEmbeddingFiles.model,
+    );
     final missingMoonshineTinyStreamingFiles = <String>[];
     for (final fileName in moonshineTinyStreamingFiles) {
       final path = moonshineFiles.files[fileName]!;
@@ -143,6 +174,29 @@ class ModelStore {
         missingFastSenseVoiceFiles.add(file.path);
       }
     }
+    final requiredSpeakerDiarizationFiles = <_RequiredRuntimeModel>[
+      _RequiredRuntimeModel(
+        path: speakerDiarizationFiles.segmentation,
+        minBytes: _speakerSegmentationModelMinBytes,
+      ),
+      _RequiredRuntimeModel(
+        path: speakerDiarizationFiles.embedding,
+        minBytes: _speakerEmbeddingModelMinBytes,
+      ),
+    ];
+    final missingSpeakerDiarizationFiles = <String>[];
+    for (final file in requiredSpeakerDiarizationFiles) {
+      if (!_isUsableFile(file.path, minBytes: file.minBytes)) {
+        missingSpeakerDiarizationFiles.add(file.path);
+      }
+    }
+    final missingSpeakerEmbeddingFiles = <String>[];
+    if (!_isUsableFile(
+      speakerEmbeddingFiles.model,
+      minBytes: _speakerEmbeddingModelMinBytes,
+    )) {
+      missingSpeakerEmbeddingFiles.add(speakerEmbeddingFiles.model);
+    }
 
     final whisperModel = await _runtimeModelPath(
       assetDirectory: '$bundledModelAssetRoot/asr/whisper',
@@ -162,6 +216,10 @@ class ModelStore {
       missingFastSenseVoiceFiles: missingFastSenseVoiceFiles,
       moonshineTinyStreamingFiles: moonshineFiles,
       missingMoonshineTinyStreamingFiles: missingMoonshineTinyStreamingFiles,
+      speakerDiarizationFiles: speakerDiarizationFiles,
+      missingSpeakerDiarizationFiles: missingSpeakerDiarizationFiles,
+      speakerEmbeddingFiles: speakerEmbeddingFiles,
+      missingSpeakerEmbeddingFiles: missingSpeakerEmbeddingFiles,
       whisperModelPath: whisperModel,
       isWhisperModelReady: _isUsableFile(
         whisperModel,
@@ -298,6 +356,36 @@ class ModelStore {
         isRequired: false,
       ),
     ];
+    final speakerSegmentationGroups = <_ModelInstallGroup>[
+      _ModelInstallGroup(
+        label: 'Sherpa speaker diarization',
+        assetDirectory:
+            '$bundledModelAssetRoot/speaker/diarization/pyannote_segmentation_3_0',
+        destinationDirectory: paths.speakerDiarizationRoot,
+        fileNames: const <String>[speakerSegmentationModelFile],
+        runtimeModels: <_RequiredRuntimeModel>[
+          _RequiredRuntimeModel(
+            path: check.speakerDiarizationFiles.segmentation,
+            minBytes: _speakerSegmentationModelMinBytes,
+          ),
+        ],
+      ),
+    ];
+    final speakerEmbeddingGroups = <_ModelInstallGroup>[
+      _ModelInstallGroup(
+        label: 'Sherpa speaker embedding',
+        assetDirectory:
+            '$bundledModelAssetRoot/speaker/embedding/3dspeaker_zh_cn_16k',
+        destinationDirectory: paths.speakerEmbeddingRoot,
+        fileNames: const <String>[speakerEmbeddingModelFile],
+        runtimeModels: <_RequiredRuntimeModel>[
+          _RequiredRuntimeModel(
+            path: check.speakerEmbeddingFiles.model,
+            minBytes: _speakerEmbeddingModelMinBytes,
+          ),
+        ],
+      ),
+    ];
     final detailedSummaryGroups = <_ModelInstallGroup>[
       _ModelInstallGroup(
         label: 'Qwen3 0.6B GGUF',
@@ -333,11 +421,22 @@ class ModelStore {
             .where((group) => group.label == 'Moonshine Tiny Streaming EN')
             .toList(growable: false),
       ModelInstallScope.fastAsr => fastAsrGroups,
+      ModelInstallScope.speakerDiarization => [
+        ...speakerSegmentationGroups,
+        ...speakerEmbeddingGroups,
+      ],
+      ModelInstallScope.speakerEmbedding => speakerEmbeddingGroups,
+      ModelInstallScope.speakerProcessing => [
+        ...speakerSegmentationGroups,
+        ...speakerEmbeddingGroups,
+      ],
       ModelInstallScope.detailedSummary => detailedSummaryGroups,
       ModelInstallScope.offlineTranscription => offlineTranscriptionGroups,
       ModelInstallScope.all => [
         ...primaryAsrGroups,
         ...fastAsrGroups,
+        ...speakerSegmentationGroups,
+        ...speakerEmbeddingGroups,
         ...detailedSummaryGroups,
         ...offlineTranscriptionGroups,
       ],
@@ -408,6 +507,24 @@ class ModelStore {
         installedPath: p.join(paths.asrRoot, sileroVadFile),
       ),
       _BundledModelCopy(
+        assetDirectory:
+            '$bundledModelAssetRoot/speaker/diarization/pyannote_segmentation_3_0',
+        fileName: speakerSegmentationModelFile,
+        installedPath: p.join(
+          paths.speakerDiarizationRoot,
+          speakerSegmentationModelFile,
+        ),
+      ),
+      _BundledModelCopy(
+        assetDirectory:
+            '$bundledModelAssetRoot/speaker/embedding/3dspeaker_zh_cn_16k',
+        fileName: speakerEmbeddingModelFile,
+        installedPath: p.join(
+          paths.speakerEmbeddingRoot,
+          speakerEmbeddingModelFile,
+        ),
+      ),
+      _BundledModelCopy(
         assetDirectory: '$bundledModelAssetRoot/asr/whisper',
         fileName: whisperModelFile,
         installedPath: p.join(paths.whisperRoot, whisperModelFile),
@@ -446,6 +563,11 @@ class ModelStore {
     await _deleteEmptyDirectory(paths.fastSenseVoiceRoot);
     await _deleteEmptyDirectory(paths.moonshineTinyStreamingRoot);
     await _deleteEmptyDirectory(paths.whisperRoot);
+    await _deleteEmptyDirectory(paths.speakerDiarizationRoot);
+    await _deleteEmptyDirectory(paths.speakerEmbeddingRoot);
+    await _deleteEmptyDirectory(p.join(paths.speakerRoot, 'diarization'));
+    await _deleteEmptyDirectory(p.join(paths.speakerRoot, 'embedding'));
+    await _deleteEmptyDirectory(paths.speakerRoot);
     removedBytes += await _deleteDirectoryIfExists(
       p.join(paths.llmRoot, 'qwen3-0.6b-mlx'),
     );
@@ -536,6 +658,17 @@ class ModelStore {
       'moonshine_tiny_streaming_en',
     );
     final whisperRoot = p.join(asrRoot, 'whisper');
+    final speakerRoot = p.join(supportPath, 'speaker_models');
+    final speakerDiarizationRoot = p.join(
+      speakerRoot,
+      'diarization',
+      'pyannote_segmentation_3_0',
+    );
+    final speakerEmbeddingRoot = p.join(
+      speakerRoot,
+      'embedding',
+      '3dspeaker_zh_cn_16k',
+    );
     final llmRoot = p.join(supportPath, 'llm_models');
     return _ModelPaths(
       asrRoot: asrRoot,
@@ -543,6 +676,9 @@ class ModelStore {
       fastSenseVoiceRoot: fastSenseVoiceRoot,
       moonshineTinyStreamingRoot: moonshineTinyStreamingRoot,
       whisperRoot: whisperRoot,
+      speakerRoot: speakerRoot,
+      speakerDiarizationRoot: speakerDiarizationRoot,
+      speakerEmbeddingRoot: speakerEmbeddingRoot,
       llmRoot: llmRoot,
     );
   }
@@ -555,6 +691,9 @@ class _ModelPaths {
     required this.fastSenseVoiceRoot,
     required this.moonshineTinyStreamingRoot,
     required this.whisperRoot,
+    required this.speakerRoot,
+    required this.speakerDiarizationRoot,
+    required this.speakerEmbeddingRoot,
     required this.llmRoot,
   });
 
@@ -563,6 +702,9 @@ class _ModelPaths {
   final String fastSenseVoiceRoot;
   final String moonshineTinyStreamingRoot;
   final String whisperRoot;
+  final String speakerRoot;
+  final String speakerDiarizationRoot;
+  final String speakerEmbeddingRoot;
   final String llmRoot;
 
   Future<void> createDirectories() async {
@@ -570,6 +712,8 @@ class _ModelPaths {
     await Directory(fastSenseVoiceRoot).create(recursive: true);
     await Directory(moonshineTinyStreamingRoot).create(recursive: true);
     await Directory(whisperRoot).create(recursive: true);
+    await Directory(speakerDiarizationRoot).create(recursive: true);
+    await Directory(speakerEmbeddingRoot).create(recursive: true);
     await Directory(llmRoot).create(recursive: true);
   }
 }
@@ -668,6 +812,22 @@ class MoonshineModelFiles {
   final Map<String, String> files;
 }
 
+class SpeakerDiarizationModelFiles {
+  const SpeakerDiarizationModelFiles({
+    required this.segmentation,
+    required this.embedding,
+  });
+
+  final String segmentation;
+  final String embedding;
+}
+
+class SpeakerEmbeddingModelFiles {
+  const SpeakerEmbeddingModelFiles({required this.model});
+
+  final String model;
+}
+
 class ModelCheckResult {
   const ModelCheckResult({
     required this.asrRootPath,
@@ -677,6 +837,10 @@ class ModelCheckResult {
     required this.missingFastSenseVoiceFiles,
     required this.moonshineTinyStreamingFiles,
     required this.missingMoonshineTinyStreamingFiles,
+    required this.speakerDiarizationFiles,
+    required this.missingSpeakerDiarizationFiles,
+    required this.speakerEmbeddingFiles,
+    required this.missingSpeakerEmbeddingFiles,
     required this.whisperModelPath,
     required this.isWhisperModelReady,
     required this.llamaModelPath,
@@ -690,6 +854,10 @@ class ModelCheckResult {
   final List<String> missingFastSenseVoiceFiles;
   final MoonshineModelFiles moonshineTinyStreamingFiles;
   final List<String> missingMoonshineTinyStreamingFiles;
+  final SpeakerDiarizationModelFiles speakerDiarizationFiles;
+  final List<String> missingSpeakerDiarizationFiles;
+  final SpeakerEmbeddingModelFiles speakerEmbeddingFiles;
+  final List<String> missingSpeakerEmbeddingFiles;
   final String whisperModelPath;
   final bool isWhisperModelReady;
   final String llamaModelPath;
@@ -699,6 +867,10 @@ class ModelCheckResult {
   bool get isFastSenseVoiceReady => missingFastSenseVoiceFiles.isEmpty;
   bool get isMoonshineTinyStreamingReady =>
       missingMoonshineTinyStreamingFiles.isEmpty;
+  bool get isSpeakerDiarizationReady => missingSpeakerDiarizationFiles.isEmpty;
+  bool get isSpeakerEmbeddingReady => missingSpeakerEmbeddingFiles.isEmpty;
+  bool get isSherpaSpeakerProcessingReady =>
+      isSpeakerDiarizationReady && isSpeakerEmbeddingReady;
   bool get isLiveAsrReady => isMoonshineTinyStreamingReady || isSenseVoiceReady;
   bool get hasFileTranscriptionSenseVoiceReady =>
       isFastSenseVoiceReady || isSenseVoiceReady;
@@ -709,6 +881,8 @@ class ModelCheckResult {
   bool get hasInstallableMissingModels =>
       !isMoonshineTinyStreamingReady ||
       !isSenseVoiceReady ||
+      !isSpeakerDiarizationReady ||
+      !isSpeakerEmbeddingReady ||
       !isWhisperModelReady ||
       !isLlamaModelReady;
 }

@@ -83,6 +83,18 @@ class AppStrings {
   }
 
   String get sherpaSenseVoice => 'Sherpa SenseVoice';
+  String get sherpaSpeakerDiarization =>
+      isZh ? 'Sherpa 人声分离' : 'Sherpa speaker diarization';
+  String get sherpaSpeakerEmbedding =>
+      isZh ? 'Sherpa 声纹 embedding' : 'Sherpa speaker embedding';
+  String get addSpeakerModels => isZh ? '添加人声分离与声纹模型' : 'Add speaker models';
+  String get installingSpeakerModels =>
+      isZh ? '正在添加人声分离与声纹模型' : 'Adding speaker models';
+  String get speakerModelsReady =>
+      isZh ? '人声分离与声纹模型已就绪' : 'Speaker models are ready';
+  String get speakerModelsMissing => isZh
+      ? '人声分离与声纹模型仍缺失，请检查打包资源'
+      : 'Speaker models are still missing; check bundled assets';
   String get moonshineTinyStreaming => 'Moonshine Tiny Streaming';
   String get whisperCpp => 'whisper.cpp';
   String get systemAsr => isZh ? '系统 ASR' : 'System ASR';
@@ -106,6 +118,10 @@ class AppStrings {
   String get asrRoot => isZh ? 'ASR 根目录' : 'ASR root';
   String get missing => isZh ? '缺失' : 'Missing';
   String get whisper => 'Whisper';
+  String get speakerDiarizationModel =>
+      isZh ? '人声分离模型' : 'Speaker diarization model';
+  String get speakerEmbeddingModel =>
+      isZh ? '声纹 embedding 模型' : 'Speaker embedding model';
   String get qwenGguf => 'Qwen GGUF';
 
   String get stop => isZh ? '停止' : 'Stop';

@@ -80,6 +80,18 @@ const optionalModelFiles = <_RequiredModelFile>[
     path: 'assets/models/asr/sensevoice_fast/tokens.txt',
     minBytes: 1024,
   ),
+  _RequiredModelFile(
+    label: 'Sherpa speaker diarization segmentation model',
+    path:
+        'assets/models/speaker/diarization/pyannote_segmentation_3_0/model.onnx',
+    minBytes: 1024 * 1024,
+  ),
+  _RequiredModelFile(
+    label: 'Sherpa speaker embedding model',
+    path:
+        'assets/models/speaker/embedding/3dspeaker_zh_cn_16k/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx',
+    minBytes: 1024 * 1024,
+  ),
 ];
 
 void main() {
@@ -109,6 +121,12 @@ void main() {
       'to download the optional Moonshine Tiny Streaming model files.',
     );
   }
+  if (_hasSpeakerModelWarnings(warnings)) {
+    stdout.writeln(
+      'Add the optional Sherpa speaker diarization and embedding model files '
+      'to enable speaker processing from the model center.',
+    );
+  }
 
   if (problems.isEmpty) {
     stdout.writeln('Offline model bundle is ready.');
@@ -126,6 +144,10 @@ bool _hasMoonshineWarnings(List<String> warnings) {
   return warnings.any(
     (warning) => warning.contains('Moonshine Tiny Streaming'),
   );
+}
+
+bool _hasSpeakerModelWarnings(List<String> warnings) {
+  return warnings.any((warning) => warning.contains('Sherpa speaker'));
 }
 
 String? _verifyModelFile(_RequiredModelFile model) {
