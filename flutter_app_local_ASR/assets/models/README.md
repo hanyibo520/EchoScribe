@@ -26,6 +26,7 @@ Before building, run:
 
 ```sh
 dart run tool/download_moonshine_tiny_streaming.dart
+dart run tool/download_sherpa_speaker_models.dart
 dart run tool/verify_offline_bundle.dart
 ```
 

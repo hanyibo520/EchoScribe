@@ -18,13 +18,13 @@ class SherpaSpeakerService {
 
   Future<AsrAvailability> checkDiarizationAvailability() async {
     final check = await _modelStore.inspect();
-    if (check.isSpeakerDiarizationReady) {
+    if (check.isSherpaSpeakerProcessingReady) {
       return const AsrAvailability.available();
     }
 
     return AsrAvailability.unavailable(
-      'Missing speaker diarization files: '
-      '${check.missingSpeakerDiarizationFiles.join(', ')}',
+      'Missing speaker processing files: '
+      '${[...check.missingSpeakerDiarizationFiles, ...check.missingSpeakerEmbeddingFiles].join(', ')}',
     );
   }
 
@@ -52,10 +52,10 @@ class SherpaSpeakerService {
     _checkSampleRate(audioSampleRate);
 
     final check = await _modelStore.inspect();
-    if (!check.isSpeakerDiarizationReady) {
+    if (!check.isSherpaSpeakerProcessingReady) {
       throw StateError(
-        'Missing speaker diarization files: '
-        '${check.missingSpeakerDiarizationFiles.join(', ')}',
+        'Missing speaker processing files: '
+        '${[...check.missingSpeakerDiarizationFiles, ...check.missingSpeakerEmbeddingFiles].join(', ')}',
       );
     }
 

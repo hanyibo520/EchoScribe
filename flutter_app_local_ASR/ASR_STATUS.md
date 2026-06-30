@@ -118,6 +118,12 @@ fast 模型文件：
 - `assets/models/speaker/diarization/pyannote_segmentation_3_0/model.onnx`
 - `assets/models/speaker/embedding/3dspeaker_zh_cn_16k/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`
 
+下载命令：
+
+```sh
+dart run tool/download_sherpa_speaker_models.dart
+```
+
 说明：
 
 - diarization 会输出 `speaker + start/end seconds`，用于判断谁在什么时候说话。

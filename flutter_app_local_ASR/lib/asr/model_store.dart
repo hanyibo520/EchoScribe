@@ -179,10 +179,6 @@ class ModelStore {
         path: speakerDiarizationFiles.segmentation,
         minBytes: _speakerSegmentationModelMinBytes,
       ),
-      _RequiredRuntimeModel(
-        path: speakerDiarizationFiles.embedding,
-        minBytes: _speakerEmbeddingModelMinBytes,
-      ),
     ];
     final missingSpeakerDiarizationFiles = <String>[];
     for (final file in requiredSpeakerDiarizationFiles) {

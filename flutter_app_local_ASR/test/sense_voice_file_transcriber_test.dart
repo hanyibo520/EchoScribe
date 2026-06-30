@@ -90,20 +90,17 @@ void main() {
     'Sherpa speaker processing requires diarization and embedding models',
     () {
       expect(_modelCheck().isSherpaSpeakerProcessingReady, isTrue);
-      expect(
-        _modelCheck(
-          missingSpeakerDiarizationFiles: const <String>[
-            'speaker-segmentation',
-          ],
-        ).isSherpaSpeakerProcessingReady,
-        isFalse,
+      final missingSegmentation = _modelCheck(
+        missingSpeakerDiarizationFiles: const <String>['speaker-segmentation'],
       );
-      expect(
-        _modelCheck(
-          missingSpeakerEmbeddingFiles: const <String>['speaker-embedding'],
-        ).isSherpaSpeakerProcessingReady,
-        isFalse,
+      expect(missingSegmentation.isSpeakerDiarizationReady, isFalse);
+      expect(missingSegmentation.isSherpaSpeakerProcessingReady, isFalse);
+
+      final missingEmbedding = _modelCheck(
+        missingSpeakerEmbeddingFiles: const <String>['speaker-embedding'],
       );
+      expect(missingEmbedding.isSpeakerDiarizationReady, isTrue);
+      expect(missingEmbedding.isSherpaSpeakerProcessingReady, isFalse);
     },
   );
 
