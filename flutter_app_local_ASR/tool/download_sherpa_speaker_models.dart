@@ -13,7 +13,8 @@ const String _embeddingDirectory =
 const String _segmentationModelFile = 'model.onnx';
 const String _embeddingModelFile =
     '3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx';
-const int _minimumModelBytes = 1024 * 1024;
+const int _minimumSegmentationModelBytes = 5 * 1000 * 1000;
+const int _minimumEmbeddingModelBytes = 39 * 1000 * 1000;
 const Duration _downloadTimeout = Duration(minutes: 5);
 
 Future<void> main(List<String> args) async {
@@ -38,7 +39,8 @@ Future<void> _ensureSegmentationModel(
     '${destinationDirectory.path}/$_segmentationModelFile',
   );
   await destinationDirectory.create(recursive: true);
-  if (!force && await _isUsable(destination, minBytes: _minimumModelBytes)) {
+  if (!force &&
+      await _isUsable(destination, minBytes: _minimumSegmentationModelBytes)) {
     stdout.writeln('OK $_segmentationModelFile already exists');
     return;
   }
@@ -53,7 +55,7 @@ Future<void> _ensureSegmentationModel(
       client,
       Uri.parse(_segmentationArchiveUrl),
       archive,
-      minBytes: _minimumModelBytes,
+      minBytes: _minimumSegmentationModelBytes,
     );
 
     final extractResult = await Process.run('tar', <String>[
@@ -72,7 +74,7 @@ Future<void> _ensureSegmentationModel(
     final source = File(
       '${workDirectory.path}/sherpa-onnx-pyannote-segmentation-3-0/model.onnx',
     );
-    if (!await _isUsable(source, minBytes: _minimumModelBytes)) {
+    if (!await _isUsable(source, minBytes: _minimumSegmentationModelBytes)) {
       throw StateError('Extracted segmentation model is missing or too small');
     }
 
@@ -94,7 +96,8 @@ Future<void> _ensureEmbeddingModel(
   final destinationDirectory = Directory(_embeddingDirectory);
   final destination = File('${destinationDirectory.path}/$_embeddingModelFile');
   await destinationDirectory.create(recursive: true);
-  if (!force && await _isUsable(destination, minBytes: _minimumModelBytes)) {
+  if (!force &&
+      await _isUsable(destination, minBytes: _minimumEmbeddingModelBytes)) {
     stdout.writeln('OK $_embeddingModelFile already exists');
     return;
   }
@@ -104,7 +107,7 @@ Future<void> _ensureEmbeddingModel(
     client,
     Uri.parse(_embeddingModelUrl),
     destination,
-    minBytes: _minimumModelBytes,
+    minBytes: _minimumEmbeddingModelBytes,
   );
 }
 

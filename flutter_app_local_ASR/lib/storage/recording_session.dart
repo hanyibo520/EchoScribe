@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../asr/asr_engine.dart';
 
 enum RecordingSourceType { live, import }
@@ -47,9 +49,7 @@ class RecordingSegment {
     return RecordingSegment(
       index: map['segment_index']! as int,
       text: map['text']! as String,
-      createdAt: DateTime.fromMillisecondsSinceEpoch(
-        map['created_at']! as int,
-      ),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(map['created_at']! as int),
       engineName: map['engine_name']! as String,
     );
   }
@@ -64,6 +64,9 @@ class RecordingSession {
     required this.segments,
     this.engineName,
     this.sourceType = RecordingSourceType.live,
+    this.audioPath,
+    this.audioSampleRate,
+    this.audioDurationMs,
   });
 
   final int id;
@@ -72,20 +75,23 @@ class RecordingSession {
   final DateTime endedAt;
   final String? engineName;
   final RecordingSourceType sourceType;
+  final String? audioPath;
+  final int? audioSampleRate;
+  final int? audioDurationMs;
   final List<RecordingSegment> segments;
+
+  bool get hasAudio => audioPath != null && audioPath!.isNotEmpty;
 
   String get previewText {
     if (segments.isEmpty) {
       return '';
     }
-    final ordered = [...segments]
-      ..sort((a, b) => a.index.compareTo(b.index));
+    final ordered = [...segments]..sort((a, b) => a.index.compareTo(b.index));
     return ordered.map((segment) => segment.text).join(' ');
   }
 
   List<AsrSegment> get asrSegments {
-    final ordered = [...segments]
-      ..sort((a, b) => a.index.compareTo(b.index));
+    final ordered = [...segments]..sort((a, b) => a.index.compareTo(b.index));
     return ordered.map((segment) => segment.toAsrSegment()).toList();
   }
 
@@ -97,9 +103,7 @@ class RecordingSession {
     required Map<String, Object?> recording,
     required List<Map<String, Object?>> segmentMaps,
   }) {
-    final segments = segmentMaps
-        .map(RecordingSegment.fromMap)
-        .toList()
+    final segments = segmentMaps.map(RecordingSegment.fromMap).toList()
       ..sort((a, b) => a.index.compareTo(b.index));
     return RecordingSession(
       id: recording['id']! as int,
@@ -114,7 +118,64 @@ class RecordingSession {
       sourceType: recording['source_type'] == 'import'
           ? RecordingSourceType.import
           : RecordingSourceType.live,
+      audioPath: recording['audio_path'] as String?,
+      audioSampleRate: recording['audio_sample_rate'] as int?,
+      audioDurationMs: recording['audio_duration_ms'] as int?,
       segments: segments,
     );
   }
+}
+
+class SpeakerTurn {
+  const SpeakerTurn({
+    this.id,
+    required this.recordingId,
+    required this.speakerLabel,
+    required this.startMs,
+    required this.endMs,
+  });
+
+  final int? id;
+  final int recordingId;
+  final String speakerLabel;
+  final int startMs;
+  final int endMs;
+
+  int get durationMs => endMs - startMs;
+
+  Map<String, Object?> toMap() {
+    return {
+      'id': id,
+      'recording_id': recordingId,
+      'speaker_label': speakerLabel,
+      'start_ms': startMs,
+      'end_ms': endMs,
+    };
+  }
+
+  factory SpeakerTurn.fromMap(Map<String, Object?> map) {
+    return SpeakerTurn(
+      id: map['id'] as int?,
+      recordingId: map['recording_id']! as int,
+      speakerLabel: map['speaker_label']! as String,
+      startMs: map['start_ms']! as int,
+      endMs: map['end_ms']! as int,
+    );
+  }
+}
+
+class SpeakerEmbeddingRecord {
+  const SpeakerEmbeddingRecord({
+    this.id,
+    required this.recordingId,
+    required this.speakerLabel,
+    required this.embedding,
+  });
+
+  final int? id;
+  final int recordingId;
+  final String speakerLabel;
+  final Float32List embedding;
+
+  int get dimension => embedding.length;
 }

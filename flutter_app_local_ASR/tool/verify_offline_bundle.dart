@@ -84,13 +84,13 @@ const optionalModelFiles = <_RequiredModelFile>[
     label: 'Sherpa speaker diarization segmentation model',
     path:
         'assets/models/speaker/diarization/pyannote_segmentation_3_0/model.onnx',
-    minBytes: 1024 * 1024,
+    minBytes: 5 * 1000 * 1000,
   ),
   _RequiredModelFile(
     label: 'Sherpa speaker embedding model',
     path:
         'assets/models/speaker/embedding/3dspeaker_zh_cn_16k/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx',
-    minBytes: 1024 * 1024,
+    minBytes: 39 * 1000 * 1000,
   ),
 ];
 

@@ -182,6 +182,24 @@ class AppStrings {
   }
 
   String get useForSummary => isZh ? '用于生成总结' : 'Use for summary';
+  String get analyzeSpeakers => isZh ? '分析说话人' : 'Analyze speakers';
+  String get analyzingSpeakers => isZh ? '正在分析说话人' : 'Analyzing speakers';
+  String get speakerAnalysis => isZh ? '说话人分析' : 'Speaker analysis';
+  String speakerCount(int count) {
+    return isZh ? '$count 位说话人' : '$count speakers';
+  }
+
+  String get missingOriginalAudioForSpeakerAnalysis => isZh
+      ? '缺少原始音频，无法进行说话人分析'
+      : 'Original audio is missing; speaker analysis is unavailable';
+  String get speakerModelsUnavailableForAnalysis => isZh
+      ? '请先在模型中心添加人声分离与声纹模型'
+      : 'Add speaker diarization and embedding models from the model center first';
+  String get noSpeakerTurns => isZh ? '暂无说话人时间线' : 'No speaker timeline yet';
+  String speakerAnalysisFailed(String error) {
+    return isZh ? '说话人分析失败：$error' : 'Speaker analysis failed: $error';
+  }
+
   String get selectedForSummary => isZh ? '已选为当前总结来源' : 'Selected for summary';
   String get pickMeetingForSummary =>
       isZh ? '选择要总结的会议' : 'Choose a meeting to summarize';

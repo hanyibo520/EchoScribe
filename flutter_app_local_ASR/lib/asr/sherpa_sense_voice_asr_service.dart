@@ -1,14 +1,18 @@
 import 'dart:async';
+import 'dart:io' show Directory;
 import 'dart:typed_data';
 
+import 'package:path/path.dart' as p;
 import 'package:record/record.dart';
 import 'package:sherpa_onnx/sherpa_onnx.dart' as sherpa;
 
+import '../audio/pcm16_wav_io.dart';
+import '../native/local_native_bridge.dart';
 import 'asr_engine.dart';
 import 'audio_utils.dart';
 import 'model_store.dart';
 
-class SherpaSenseVoiceAsrService implements AsrEngine {
+class SherpaSenseVoiceAsrService implements AsrEngine, CapturedAudioAsrEngine {
   SherpaSenseVoiceAsrService({required ModelStore modelStore})
     : _modelStore = modelStore;
 
@@ -39,6 +43,8 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
   sherpa.VoiceActivityDetector? _vad;
   sherpa.CircularBuffer? _buffer;
   sherpa.VadModelConfig? _vadConfig;
+  Pcm16WavFileWriter? _audioWriter;
+  CapturedRecordingAudio? _lastCapturedAudio;
 
   bool _isInitialized = false;
   bool _isRecording = false;
@@ -70,6 +76,7 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
       return;
     }
 
+    _lastCapturedAudio = null;
     await _ensureInitialized();
 
     final hasPermission = await _recorder.hasPermission();
@@ -89,7 +96,18 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
       streamBufferSize: 4096,
     );
 
-    final audioStream = await _recorder.startStream(config);
+    final writer = await Pcm16WavFileWriter.create(
+      path: await _recordingAudioPath(),
+      sampleRate: _sampleRate,
+    );
+    late final Stream<Uint8List> audioStream;
+    try {
+      audioStream = await _recorder.startStream(config);
+    } catch (_) {
+      await writer.close();
+      rethrow;
+    }
+    _audioWriter = writer;
     _audioSubscription = audioStream.listen(
       _acceptAudio,
       onError: (Object error) => _status.add(error.toString()),
@@ -111,6 +129,9 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
     await _recorder.stop();
     await _audioSubscription?.cancel();
     _audioSubscription = null;
+    final audioFile = await _audioWriter?.close();
+    _audioWriter = null;
+    _lastCapturedAudio = _capturedAudioFromFile(audioFile);
 
     _vad?.flush();
     _drainVadSegments();
@@ -126,6 +147,8 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
       await stop();
     }
     await _audioSubscription?.cancel();
+    await _audioWriter?.close();
+    _audioWriter = null;
     await _recorder.dispose();
     _recognizer?.free();
     _vad?.free();
@@ -133,6 +156,13 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
     await _segments.close();
     await _partials.close();
     await _status.close();
+  }
+
+  @override
+  Future<CapturedRecordingAudio?> takeLastCapturedAudio() async {
+    final audio = _lastCapturedAudio;
+    _lastCapturedAudio = null;
+    return audio;
   }
 
   Future<void> _ensureInitialized() async {
@@ -186,6 +216,8 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
   }
 
   void _acceptAudio(Uint8List data) {
+    _audioWriter?.append(data);
+
     final buffer = _buffer;
     final vad = _vad;
     final vadConfig = _vadConfig;
@@ -277,6 +309,29 @@ class SherpaSenseVoiceAsrService implements AsrEngine {
     _lastPartialText = text;
     _partials.add(
       AsrPartial(text: text, updatedAt: now, engineName: '$name partial'),
+    );
+  }
+
+  Future<String> _recordingAudioPath() async {
+    final supportPath = await LocalNativeBridge.instance
+        .applicationSupportDirectory();
+    final directory = Directory(p.join(supportPath, 'recording_audio', 'live'));
+    await directory.create(recursive: true);
+    return p.join(
+      directory.path,
+      'sherpa_live_${DateTime.now().microsecondsSinceEpoch}.wav',
+    );
+  }
+
+  CapturedRecordingAudio? _capturedAudioFromFile(Pcm16AudioFile? file) {
+    if (file == null) {
+      return null;
+    }
+    return CapturedRecordingAudio(
+      path: file.path,
+      sampleRate: file.sampleRate,
+      durationMs: file.durationMs,
+      byteLength: file.byteLength,
     );
   }
 

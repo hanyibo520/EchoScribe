@@ -10,6 +10,24 @@ abstract class AsrEngine {
   Future<void> dispose();
 }
 
+class CapturedRecordingAudio {
+  const CapturedRecordingAudio({
+    required this.path,
+    required this.sampleRate,
+    required this.durationMs,
+    required this.byteLength,
+  });
+
+  final String path;
+  final int sampleRate;
+  final int durationMs;
+  final int byteLength;
+}
+
+abstract class CapturedAudioAsrEngine {
+  Future<CapturedRecordingAudio?> takeLastCapturedAudio();
+}
+
 class AsrAvailability {
   const AsrAvailability.available() : reason = null;
   const AsrAvailability.unavailable(this.reason);

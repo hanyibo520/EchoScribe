@@ -24,6 +24,7 @@ class FallbackAsrService implements AsrEngine {
   final StreamController<String> _status = StreamController<String>.broadcast();
 
   AsrEngine? _activeEngine;
+  AsrEngine? _lastStoppedEngine;
   Set<String>? _enabledEngineNames;
 
   @override
@@ -69,6 +70,7 @@ class FallbackAsrService implements AsrEngine {
   @override
   Future<void> start() async {
     final errors = <String>[];
+    _lastStoppedEngine = null;
 
     for (final engine in _enabledEngines) {
       final availability = await engine.checkAvailability();
@@ -100,7 +102,20 @@ class FallbackAsrService implements AsrEngine {
 
     await engine.stop();
     _status.add('Stopped ${engine.name}');
+    _lastStoppedEngine = engine;
     _activeEngine = null;
+  }
+
+  Future<CapturedRecordingAudio?> takeLastCapturedAudio() async {
+    final engine = _lastStoppedEngine;
+    if (engine == null || engine is! CapturedAudioAsrEngine) {
+      _lastStoppedEngine = null;
+      return null;
+    }
+    final capturedEngine = engine as CapturedAudioAsrEngine;
+    final audio = await capturedEngine.takeLastCapturedAudio();
+    _lastStoppedEngine = null;
+    return audio;
   }
 
   @override

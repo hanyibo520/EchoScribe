@@ -48,8 +48,8 @@ class ModelStore {
   static const int _moonshineModelMinBytes = 1024;
   static const int _moonshineTokenizerMinBytes = 1024;
   static const int _moonshineConfigMinBytes = 64;
-  static const int _speakerSegmentationModelMinBytes = 1024 * 1024;
-  static const int _speakerEmbeddingModelMinBytes = 1024 * 1024;
+  static const int _speakerSegmentationModelMinBytes = 5 * 1000 * 1000;
+  static const int _speakerEmbeddingModelMinBytes = 39 * 1000 * 1000;
   static const int _whisperModelMinBytes = 120 * 1024 * 1024;
   static const int _qwenGgufModelMinBytes = 350 * 1024 * 1024;
 

@@ -1,9 +1,11 @@
 import 'dart:async';
-import 'dart:io' show File, FileSystemException;
+import 'dart:io' show Directory, File, FileSystemException;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:path/path.dart' as p;
 
+import 'audio/pcm16_wav_io.dart';
 import 'asr/asr_engine.dart';
 import 'asr/fallback_asr_service.dart';
 import 'asr/model_store.dart';
@@ -15,6 +17,7 @@ import 'asr/system_asr_engine.dart';
 import 'asr/whisper_cpp_asr_engine.dart';
 import 'l10n/app_strings.dart';
 import 'native/local_native_bridge.dart';
+import 'speaker/sherpa_speaker_service.dart';
 import 'summary/llama_cpp_summary_service.dart';
 import 'summary/meeting_summary_service.dart';
 import 'storage/recording_database.dart';
@@ -143,6 +146,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   late final ModelStore _modelStore;
   late final FallbackAsrService _asrService;
   late final SenseVoiceFileTranscriber _senseVoiceFileTranscriber;
+  late final SherpaSpeakerService _speakerService;
   late final MeetingSummaryService _simpleSummaryService;
   late final MeetingSummaryService _detailedSummaryService;
 
@@ -191,6 +195,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     _senseVoiceFileTranscriber = SenseVoiceFileTranscriber(
       modelStore: _modelStore,
     );
+    _speakerService = SherpaSpeakerService(modelStore: _modelStore);
     _simpleSummaryService = FallbackMeetingSummaryService(
       engines: [
         HeuristicMeetingSummaryService(),
@@ -311,6 +316,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     RecordingSourceType sourceType = RecordingSourceType.live,
     String? title,
     DateTime? createdAt,
+    CapturedRecordingAudio? capturedAudio,
   }) async {
     if (segments.isEmpty) {
       return;
@@ -325,6 +331,9 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       engineName: engineName,
       sourceType: sourceType,
       createdAt: createdAt ?? _recordingStartedAt,
+      audioPath: capturedAudio?.path,
+      audioSampleRate: capturedAudio?.sampleRate,
+      audioDurationMs: capturedAudio?.durationMs,
     );
     if (!mounted) {
       return;
@@ -374,15 +383,22 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
   }
 
   Future<void> _openRecordingDetail(RecordingSession session) async {
+    final check = await _modelStore.inspect();
+    if (!mounted) {
+      return;
+    }
+    setState(() => _modelCheck = check);
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (context) => RecordingDetailPage(
           session: session,
+          speakerModelsReady: check.isSherpaSpeakerProcessingReady,
           onUseForSummary: () {
             _selectRecordingForSummary(session);
             Navigator.of(context).pop();
             _onTabSelected(_summaryTabIndex);
           },
+          onAnalyzeSpeakers: _analyzeSpeakersForRecording,
         ),
       ),
     );
@@ -871,6 +887,144 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     }
   }
 
+  Future<CapturedRecordingAudio?> _saveImportedAudio(
+    PickedAudioFile picked,
+  ) async {
+    final decoded = await LocalNativeBridge.instance.decodeAudioFileToPcm16(
+      audioFilePath: picked.path,
+    );
+    if (decoded.pcm16Audio.isEmpty) {
+      return null;
+    }
+    final saved = await savePcm16WavFile(
+      path: await _recordingAudioPath('import'),
+      pcm16Audio: decoded.pcm16Audio,
+      sampleRate: decoded.sampleRate,
+    );
+    return _capturedAudioFromFile(saved);
+  }
+
+  Future<String> _recordingAudioPath(String prefix) async {
+    final supportPath = await LocalNativeBridge.instance
+        .applicationSupportDirectory();
+    final directory = Directory(p.join(supportPath, 'recording_audio'));
+    await directory.create(recursive: true);
+    return p.join(
+      directory.path,
+      '${prefix}_${DateTime.now().microsecondsSinceEpoch}.wav',
+    );
+  }
+
+  CapturedRecordingAudio _capturedAudioFromFile(Pcm16AudioFile file) {
+    return CapturedRecordingAudio(
+      path: file.path,
+      sampleRate: file.sampleRate,
+      durationMs: file.durationMs,
+      byteLength: file.byteLength,
+    );
+  }
+
+  Future<void> _analyzeSpeakersForRecording(RecordingSession session) async {
+    final check = await _modelStore.inspect();
+    if (!check.isSherpaSpeakerProcessingReady) {
+      throw StateError(
+        'Missing speaker processing files: '
+        '${[...check.missingSpeakerDiarizationFiles, ...check.missingSpeakerEmbeddingFiles].join(', ')}',
+      );
+    }
+    final audioPath = session.audioPath;
+    if (audioPath == null || audioPath.isEmpty) {
+      throw StateError('Missing original audio for speaker analysis');
+    }
+
+    final audio = await readPcm16WavFile(audioPath);
+    final rawTurns = await _speakerService.diarizePcm16Audio(
+      pcm16Audio: audio.pcm16Audio,
+      audioSampleRate: audio.sampleRate,
+    );
+    final turns = _speakerTurnsFromSherpaSegments(
+      recordingId: session.id,
+      segments: rawTurns,
+      audioDurationMs: audio.durationMs,
+    );
+    if (turns.isEmpty) {
+      throw StateError('No speaker turns were detected');
+    }
+
+    final embeddings = <SpeakerEmbeddingRecord>[];
+    final turnsBySpeaker = <String, List<SpeakerTurn>>{};
+    for (final turn in turns) {
+      turnsBySpeaker.putIfAbsent(turn.speakerLabel, () => []).add(turn);
+    }
+    for (final entry in turnsBySpeaker.entries) {
+      final speakerAudio = concatPcm16Audio(
+        entry.value.map(
+          (turn) => slicePcm16Audio(
+            pcm16Audio: audio.pcm16Audio,
+            sampleRate: audio.sampleRate,
+            startMs: turn.startMs,
+            endMs: turn.endMs,
+          ),
+        ),
+      );
+      final embedding = await _speakerService.computeEmbeddingFromPcm16Audio(
+        pcm16Audio: speakerAudio,
+        audioSampleRate: audio.sampleRate,
+      );
+      if (embedding.isEmpty) {
+        continue;
+      }
+      embeddings.add(
+        SpeakerEmbeddingRecord(
+          recordingId: session.id,
+          speakerLabel: entry.key,
+          embedding: embedding.values,
+        ),
+      );
+    }
+
+    await RecordingDatabase.instance.saveSpeakerAnalysis(
+      recordingId: session.id,
+      turns: turns,
+      embeddings: embeddings,
+    );
+    await _loadRecordings();
+  }
+
+  List<SpeakerTurn> _speakerTurnsFromSherpaSegments({
+    required int recordingId,
+    required List<SpeakerTurnSegment> segments,
+    required int audioDurationMs,
+  }) {
+    final turns = <SpeakerTurn>[];
+    for (final segment in segments) {
+      final startMs = (segment.startTimeSeconds * 1000)
+          .round()
+          .clamp(0, audioDurationMs)
+          .toInt();
+      final endMs = (segment.endTimeSeconds * 1000)
+          .round()
+          .clamp(startMs, audioDurationMs)
+          .toInt();
+      if (endMs <= startMs) {
+        continue;
+      }
+      turns.add(
+        SpeakerTurn(
+          recordingId: recordingId,
+          speakerLabel: 'Speaker ${segment.speakerIndex + 1}',
+          startMs: startMs,
+          endMs: endMs,
+        ),
+      );
+    }
+    turns.sort((a, b) {
+      final start = a.startMs.compareTo(b.startMs);
+      return start == 0 ? a.endMs.compareTo(b.endMs) : start;
+    });
+    return turns;
+  }
+
   Future<int> _safeFileLength(String path) async {
     try {
       return await File(path).length();
@@ -897,6 +1051,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         _status = _StatusMessage((strings) => strings.stoppingRecording);
       });
       await _asrService.stop();
+      final capturedAudio = await _asrService.takeLastCapturedAudio();
       stopWatch.stop();
       await Future<void>.delayed(Duration.zero);
       final capturedSegments = _buildSegmentsToPersist();
@@ -928,6 +1083,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       await _saveCompletedRecording(
         segments: capturedSegments,
         engineName: engineName,
+        capturedAudio: capturedAudio,
       );
       return;
     }
@@ -1133,6 +1289,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       if (importedSegments.isEmpty) {
         throw StateError(strings.audioFileNoSpeech);
       }
+      final capturedAudio = await _saveImportedAudio(picked);
 
       setState(() {
         _isImportingAudio = false;
@@ -1147,6 +1304,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         engineName: importedSegments.first.engineName,
         sourceType: RecordingSourceType.import,
         title: strings.isZh ? '导入-${picked.name}' : 'Import-${picked.name}',
+        capturedAudio: capturedAudio,
       );
     } catch (error) {
       if (!mounted) {
