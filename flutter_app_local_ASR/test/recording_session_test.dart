@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:flutter_app/speaker/sherpa_speaker_service.dart';
 import 'package:flutter_app/storage/recording_session.dart';
 
 void main() {
@@ -72,5 +73,33 @@ void main() {
     expect(match.isProfileMatch, isTrue);
     expect(match.isSelfMatch, isTrue);
     expect(match.threshold, 0.6);
+  });
+
+  test('speaker embedding matches require threshold and clear margin', () {
+    const accepted = SpeakerEmbeddingMatch(
+      name: 'Alice',
+      score: 0.66,
+      runnerUpScore: 0.62,
+      threshold: 0.6,
+      margin: 0.03,
+    );
+    const ambiguous = SpeakerEmbeddingMatch(
+      name: 'Alice',
+      score: 0.66,
+      runnerUpScore: 0.64,
+      threshold: 0.6,
+      margin: 0.03,
+    );
+    const weak = SpeakerEmbeddingMatch(
+      name: 'Alice',
+      score: 0.59,
+      runnerUpScore: 0.20,
+      threshold: 0.6,
+      margin: 0.03,
+    );
+
+    expect(accepted.isAccepted, isTrue);
+    expect(ambiguous.isAccepted, isFalse);
+    expect(weak.isAccepted, isFalse);
   });
 }

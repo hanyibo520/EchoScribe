@@ -13,6 +13,7 @@ class SherpaSpeakerService {
 
   static const int sampleRate = 16000;
   static const double defaultSpeakerMatchThreshold = 0.6;
+  static const double defaultSpeakerMatchMargin = 0.03;
   static const int _numThreads = 2;
 
   final ModelStore _modelStore;
@@ -123,6 +124,41 @@ class SherpaSpeakerService {
     );
   }
 
+  Future<SpeakerEmbeddingMatch> findBestSpeakerEmbeddingMatch({
+    required Float32List embedding,
+    required Map<String, Float32List> referenceEmbeddings,
+    double threshold = defaultSpeakerMatchThreshold,
+    double margin = defaultSpeakerMatchMargin,
+  }) async {
+    if (embedding.isEmpty || referenceEmbeddings.isEmpty) {
+      return SpeakerEmbeddingMatch.noMatch(
+        threshold: threshold,
+        margin: margin,
+      );
+    }
+
+    final dimension = embedding.length;
+    final compatibleReferences = <String, Float32List>{
+      for (final entry in referenceEmbeddings.entries)
+        if (entry.value.length == dimension) entry.key: entry.value,
+    };
+    if (compatibleReferences.isEmpty) {
+      return SpeakerEmbeddingMatch.noMatch(
+        threshold: threshold,
+        margin: margin,
+      );
+    }
+
+    return Isolate.run(
+      () => _findBestSpeakerEmbeddingMatch(
+        embedding: embedding,
+        referenceEmbeddings: compatibleReferences,
+        threshold: threshold,
+        margin: margin,
+      ),
+    );
+  }
+
   void _checkSampleRate(int audioSampleRate) {
     if (audioSampleRate != sampleRate) {
       throw ArgumentError.value(
@@ -160,6 +196,40 @@ class SpeakerEmbeddingVector {
 
   int get dimension => values.length;
   bool get isEmpty => values.isEmpty;
+}
+
+class SpeakerEmbeddingMatch {
+  const SpeakerEmbeddingMatch({
+    required this.name,
+    required this.score,
+    required this.runnerUpScore,
+    required this.threshold,
+    required this.margin,
+  });
+
+  factory SpeakerEmbeddingMatch.noMatch({
+    required double threshold,
+    required double margin,
+    double score = 0,
+    double runnerUpScore = 0,
+  }) {
+    return SpeakerEmbeddingMatch(
+      name: '',
+      score: score,
+      runnerUpScore: runnerUpScore,
+      threshold: threshold,
+      margin: margin,
+    );
+  }
+
+  final String name;
+  final double score;
+  final double runnerUpScore;
+  final double threshold;
+  final double margin;
+
+  bool get isAccepted =>
+      name.isNotEmpty && score >= threshold && score - runnerUpScore >= margin;
 }
 
 List<SpeakerTurnSegment> _diarizePcm16Audio({
@@ -263,4 +333,73 @@ String _searchSpeakerEmbedding({
   } finally {
     manager.free();
   }
+}
+
+SpeakerEmbeddingMatch _findBestSpeakerEmbeddingMatch({
+  required Float32List embedding,
+  required Map<String, Float32List> referenceEmbeddings,
+  required double threshold,
+  required double margin,
+}) {
+  sherpa.initBindings();
+  final manager = sherpa.SpeakerEmbeddingManager(embedding.length);
+  try {
+    for (final entry in referenceEmbeddings.entries) {
+      manager.add(name: entry.key, embedding: entry.value);
+    }
+
+    var bestName = '';
+    var bestScore = 0.0;
+    var runnerUpScore = 0.0;
+    for (final name in referenceEmbeddings.keys) {
+      final score = _estimateVerificationScore(
+        manager: manager,
+        name: name,
+        embedding: embedding,
+      );
+      if (score > bestScore) {
+        runnerUpScore = bestScore;
+        bestScore = score;
+        bestName = name;
+      } else if (score > runnerUpScore) {
+        runnerUpScore = score;
+      }
+    }
+
+    final match = SpeakerEmbeddingMatch(
+      name: bestName,
+      score: bestScore,
+      runnerUpScore: runnerUpScore,
+      threshold: threshold,
+      margin: margin,
+    );
+    return match.isAccepted
+        ? match
+        : SpeakerEmbeddingMatch.noMatch(
+            threshold: threshold,
+            margin: margin,
+            score: bestScore,
+            runnerUpScore: runnerUpScore,
+          );
+  } finally {
+    manager.free();
+  }
+}
+
+double _estimateVerificationScore({
+  required sherpa.SpeakerEmbeddingManager manager,
+  required String name,
+  required Float32List embedding,
+}) {
+  var low = 0.0;
+  var high = 1.0;
+  for (var i = 0; i < 14; i += 1) {
+    final mid = (low + high) / 2;
+    if (manager.verify(name: name, embedding: embedding, threshold: mid)) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
 }

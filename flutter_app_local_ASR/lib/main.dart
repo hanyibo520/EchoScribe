@@ -188,6 +188,8 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
 
   static const int _summaryTabIndex = 3;
   static const int _minVoiceProfileDurationMs = 10000;
+  static const int _minSpeakerTurnForEmbeddingMs = 400;
+  static const int _minSpeakerEmbeddingDurationMs = 1500;
 
   @override
   void initState() {
@@ -1323,8 +1325,18 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
       turnsBySpeaker.putIfAbsent(turn.speakerLabel, () => []).add(turn);
     }
     for (final entry in turnsBySpeaker.entries) {
+      final embeddingTurns = entry.value
+          .where((turn) => turn.durationMs >= _minSpeakerTurnForEmbeddingMs)
+          .toList();
+      final embeddingDurationMs = embeddingTurns.fold<int>(
+        0,
+        (total, turn) => total + turn.durationMs,
+      );
+      if (embeddingDurationMs < _minSpeakerEmbeddingDurationMs) {
+        continue;
+      }
       final speakerAudio = concatPcm16Audio(
-        entry.value.map(
+        embeddingTurns.map(
           (turn) => slicePcm16Audio(
             pcm16Audio: audio.pcm16Audio,
             sampleRate: audio.sampleRate,
@@ -1385,10 +1397,11 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     };
     final matches = <SpeakerProfileMatch>[];
     for (final embedding in embeddings) {
-      final matchedKey = await _speakerService.searchSpeakerEmbedding(
+      final match = await _speakerService.findBestSpeakerEmbeddingMatch(
         embedding: embedding.embedding,
         referenceEmbeddings: referenceEmbeddings,
       );
+      final matchedKey = match.name;
       final matchedProfile = profilesBySearchKey[matchedKey];
       matches.add(
         SpeakerProfileMatch(
@@ -1398,8 +1411,8 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
           displayLabel: matchedProfile == null
               ? strings.otherSpeakerLabel(embedding.speakerLabel)
               : matchedProfile.displayName,
-          isSelfMatch: matchedProfile != null,
-          threshold: SherpaSpeakerService.defaultSpeakerMatchThreshold,
+          isSelfMatch: match.isAccepted && matchedProfile != null,
+          threshold: match.threshold,
         ),
       );
     }
