@@ -31,6 +31,15 @@ import 'ui/summary_detail_page.dart';
 
 enum _PrimaryAsrModel { moonshine, sherpa }
 
+class _UserVisibleException implements Exception {
+  const _UserVisibleException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 extension _PrimaryAsrModelInfo on _PrimaryAsrModel {
   String get engineName {
     return switch (this) {
@@ -1182,6 +1191,62 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
     );
   }
 
+  Future<String> _resolveRecordingAudioPath(RecordingSession session) async {
+    final strings = AppStrings.of(context);
+    final audioPath = session.audioPath;
+    if (audioPath == null || audioPath.isEmpty) {
+      throw _UserVisibleException(
+        strings.missingOriginalAudioForSpeakerAnalysis,
+      );
+    }
+
+    if (await File(audioPath).exists()) {
+      return audioPath;
+    }
+
+    final supportPath = await LocalNativeBridge.instance
+        .applicationSupportDirectory();
+    for (final candidate in _recordingAudioPathMigrationCandidates(
+      audioPath: audioPath,
+      supportPath: supportPath,
+    )) {
+      if (await File(candidate).exists()) {
+        await RecordingDatabase.instance.updateRecordingAudioPath(
+          recordingId: session.id,
+          audioPath: candidate,
+        );
+        return candidate;
+      }
+    }
+
+    throw _UserVisibleException(
+      strings.missingOriginalAudioFileForSpeakerAnalysis,
+    );
+  }
+
+  List<String> _recordingAudioPathMigrationCandidates({
+    required String audioPath,
+    required String supportPath,
+  }) {
+    final candidates = <String>{};
+    final normalizedPath = p.normalize(audioPath);
+    final pathParts = p.split(normalizedPath);
+    final recordingAudioIndex = pathParts.lastIndexOf('recording_audio');
+    if (recordingAudioIndex >= 0) {
+      candidates.add(
+        p.joinAll([supportPath, ...pathParts.sublist(recordingAudioIndex)]),
+      );
+    }
+
+    final fileName = p.basename(audioPath);
+    if (fileName.isNotEmpty) {
+      candidates.add(p.join(supportPath, 'recording_audio', fileName));
+      candidates.add(p.join(supportPath, 'recording_audio', 'live', fileName));
+    }
+    candidates.remove(audioPath);
+    return candidates.toList(growable: false);
+  }
+
   Future<String> _voiceProfileAudioPath() async {
     final supportPath = await LocalNativeBridge.instance
         .applicationSupportDirectory();
@@ -1300,11 +1365,7 @@ class _MeetingAsrPageState extends State<MeetingAsrPage>
         '${[...check.missingSpeakerDiarizationFiles, ...check.missingSpeakerEmbeddingFiles].join(', ')}',
       );
     }
-    final audioPath = session.audioPath;
-    if (audioPath == null || audioPath.isEmpty) {
-      throw StateError('Missing original audio for speaker analysis');
-    }
-
+    final audioPath = await _resolveRecordingAudioPath(session);
     final audio = await readPcm16WavFile(audioPath);
     final rawTurns = await _speakerService.diarizePcm16Audio(
       pcm16Audio: audio.pcm16Audio,

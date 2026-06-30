@@ -322,6 +322,19 @@ class RecordingDatabase {
     });
   }
 
+  Future<void> updateRecordingAudioPath({
+    required int recordingId,
+    required String audioPath,
+  }) async {
+    final db = await database;
+    await db.update(
+      'recordings',
+      {'audio_path': audioPath},
+      where: 'id = ?',
+      whereArgs: [recordingId],
+    );
+  }
+
   Future<List<SpeakerTurn>> listSpeakerTurns(int recordingId) async {
     final db = await database;
     final rows = await db.query(

@@ -261,6 +261,9 @@ class AppStrings {
   String get missingOriginalAudioForSpeakerAnalysis => isZh
       ? '缺少原始音频，无法进行说话人分析'
       : 'Original audio is missing; speaker analysis is unavailable';
+  String get missingOriginalAudioFileForSpeakerAnalysis => isZh
+      ? '原始音频文件已不存在，无法重新分析；已有说话人结果仍可查看'
+      : 'The original audio file no longer exists, so speaker analysis cannot be rerun; existing speaker results remain available';
   String get speakerModelsUnavailableForAnalysis => isZh
       ? '请先在模型中心添加人声分离与声纹模型'
       : 'Add speaker diarization and embedding models from the model center first';
